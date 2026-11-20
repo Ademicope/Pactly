@@ -215,6 +215,14 @@ export function useHoldSlot() {
   });
 }
 
+/** `POST /bookings/:id/reschedule` -- move a locked booking to another open
+ * slot of the same shop while inside its free-cancellation window. The
+ * escrow contract, amount and parties are untouched; no second escrow is
+ * deployed. */
+export function rescheduleBooking(bookingId: string, slotStartsAt: number, session: Session): Promise<BookingView> {
+  return apiPost<BookingView>(`/bookings/${bookingId}/reschedule`, { slotStartsAt }, session.token);
+}
+
 export function lockDeposit(bookingId: string, session: Session, rebuild = false): Promise<LockResponse> {
   return apiPost<LockResponse>(`/bookings/${bookingId}/lock`, rebuild ? { rebuild: true } : {}, session.token);
 }

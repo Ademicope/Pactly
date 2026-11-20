@@ -106,7 +106,12 @@ import {
   submitSignedTransaction,
   type BuildBalancePaymentDeps,
 } from "./services/booking.js";
-import { InvalidCloseDateError, closeProviderDate } from "./services/availability.js";
+import {
+  BookingOutsideCancellationWindowError,
+  InvalidCloseDateError,
+  closeProviderDate,
+  rescheduleLockedBooking,
+} from "./services/availability.js";
 import { EscrowApiError, EscrowConfigError, EscrowRequestError } from "./escrow/trustless-work/errors.js";
 import { defaultEscrowAdapter } from "./escrow/trustless-work/client.js";
 import type { EscrowAdapter } from "./escrow/interface.js";
@@ -790,6 +795,40 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
           { code: "SLOT_TAKEN", message: error.message, details: { sameDaySlots: error.sameDaySlots } },
           409,
         );
+      }
+      throw error;
+    }
+  });
+
+  /** Rescheduling a locked booking: the client's own booking, still inside
+   * its free-cancellation window, moves to another open slot of the same
+   * shop. Only the slot and cancellation deadline change -- the escrow
+   * contract id, amount and parties stay put, so there is no second escrow. */
+  app.post("/bookings/:id/reschedule", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    const body = await c.req.json().catch(() => undefined);
+    const slotStartsAt = typeof body?.slotStartsAt === "number" ? body.slotStartsAt : undefined;
+    if (slotStartsAt === undefined || !Number.isInteger(slotStartsAt)) {
+      return c.json({ code: "invalid_request", message: "slotStartsAt must be an integer number of epoch seconds." }, 400);
+    }
+    try {
+      const view = await rescheduleLockedBooking(db, bookingId, c.get("walletAddress"), slotStartsAt);
+      return c.json(view);
+    } catch (error) {
+      if (error instanceof BookingNotFoundError) {
+        return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof BookingOutsideCancellationWindowError) {
+        return c.json({ code: "CANCELLATION_WINDOW_CLOSED", message: error.message }, 409);
+      }
+      if (error instanceof SlotUnavailableError) {
+        return c.json({ code: "SLOT_UNAVAILABLE", message: error.message }, 409);
+      }
+      if (error instanceof BookingEscrowStateError) {
+        return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
       }
       throw error;
     }

@@ -15,10 +15,17 @@
  * `releaseUnpaidHoldsForProviderDate` and `db/availabilitySlots.ts`'s
  * `closeSlotsInRange`.
  */
-import { closeSlotsInRange } from "../db/availabilitySlots.js";
-import { releaseUnpaidHoldsForProviderDate } from "../db/bookings.js";
+import { closeSlotsInRange, getSlotByProviderAndStart } from "../db/availabilitySlots.js";
+import { releaseUnpaidHoldsForProviderDate, rescheduleBookingSlot } from "../db/bookings.js";
 import type { Db } from "../db/client.js";
-import { getProviderProfileByWallet } from "../db/providerProfiles.js";
+import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
+import {
+  BookingEscrowStateError,
+  SlotUnavailableError,
+  getBookingForClient,
+  getBookingView,
+  type BookingView,
+} from "./booking.js";
 import { NotAProviderError } from "./profile.js";
 
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -26,6 +33,15 @@ const DAY_SECONDS = 24 * 60 * 60;
 /** `Date#getTimezoneOffset`'s own documented range, in minutes. */
 const MIN_TZ_OFFSET_MINUTES = -14 * 60;
 const MAX_TZ_OFFSET_MINUTES = 14 * 60;
+
+/** A locked booking can only move while its own free-cancellation window
+ * (the existing `cancel_deadline`) is still open. */
+export class BookingOutsideCancellationWindowError extends Error {
+  constructor(message = "This booking is past its free-cancellation window and can no longer move.") {
+    super(message);
+    this.name = "BookingOutsideCancellationWindowError";
+  }
+}
 
 export class InvalidCloseDateError extends Error {
   readonly details: Record<string, string>;
@@ -91,6 +107,65 @@ export function localDateRange(
   }
   const rangeStart = Math.floor(utcMidnight / 1000) + tzOffsetMinutes * 60;
   return { rangeStart, rangeEnd: rangeStart + DAY_SECONDS };
+}
+
+/**
+ * `POST /bookings/:id/reschedule`: moves the caller's own locked booking to
+ * another open slot of the same shop, inside the booking's free-cancellation
+ * window. Only `slot_id` and `cancel_deadline` are written -- the escrow
+ * contract id, deposit amounts, client and provider are untouched, so the
+ * deposit keeps sitting in the same contract and no second escrow is
+ * created. The old slot simply stops being booked (it becomes available);
+ * the new slot becomes this booking's slot.
+ *
+ * The target is looked up by this booking's own `provider_profile_id`, so a
+ * different shop's slot can never match, and both slots share the one
+ * `sessionLengthMinutes` that belongs to that shop -- the duration is
+ * therefore the same by construction. A slot taken between the caller's
+ * click and this write makes the atomic DB move return `false`, which is
+ * surfaced as {@link SlotUnavailableError}; nothing is overwritten.
+ */
+export async function rescheduleLockedBooking(
+  db: Db,
+  bookingId: string,
+  walletAddress: string,
+  newSlotStartsAt: number,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<BookingView> {
+  const booking = await getBookingForClient(db, bookingId, walletAddress);
+  if (booking.escrowState !== "locked") {
+    throw new BookingEscrowStateError("Only a booking with a locked deposit can move to another time.");
+  }
+  if (now >= booking.cancelDeadline) {
+    throw new BookingOutsideCancellationWindowError();
+  }
+  if (!booking.slotId) {
+    throw new SlotUnavailableError("This booking has no slot to move from.");
+  }
+  if (!Number.isInteger(newSlotStartsAt)) {
+    throw new SlotUnavailableError("Pick a valid slot start time.");
+  }
+
+  const newSlot = await getSlotByProviderAndStart(db, booking.providerProfileId, newSlotStartsAt);
+  if (!newSlot || newSlot.withdrawnAt !== null || newSlot.startsAt <= now) {
+    throw new SlotUnavailableError("That time is no longer open.");
+  }
+  if (newSlot.id === booking.slotId) {
+    return getBookingView(db, bookingId, walletAddress);
+  }
+
+  const profile = await getProviderProfileById(db, booking.providerProfileId);
+  if (!profile) {
+    // Unreachable: `provider_profile_id` is a foreign key.
+    throw new SlotUnavailableError("That shop no longer has a profile.");
+  }
+  const newCancelDeadline = newSlot.startsAt - profile.cancellationWindowHours * 3600;
+
+  const moved = await rescheduleBookingSlot(db, bookingId, booking.slotId, newSlot.id, newCancelDeadline, now);
+  if (!moved) {
+    throw new SlotUnavailableError("That time was taken just now. Pick another open time.");
+  }
+  return getBookingView(db, bookingId, walletAddress);
 }
 
 /**
