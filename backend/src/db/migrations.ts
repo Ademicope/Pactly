@@ -327,4 +327,8 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "bookings", "anchor_trustline_tx_hash")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN anchor_trustline_tx_hash TEXT`);
   }
+  // Mark client arrived: the shop marks when a client walks in.
+  if (!hasColumn(sqlite, "bookings", "arrived_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN arrived_at INTEGER`);
+  }
 }

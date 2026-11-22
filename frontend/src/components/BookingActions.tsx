@@ -6,6 +6,7 @@ import {
   buildBalancePayment,
   completeAppointment,
   markBalancePaidCash,
+  markBookingArrived,
   openDispute,
   releaseDeposit,
   submitBalancePayment,
@@ -41,6 +42,9 @@ export interface BookingActionsProps {
    * "Pay balance": the spec's own "Always" rule, "only before the
    * appointment starts". */
   slotStartsAt: number | null;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
   session?: Session;
   /** Called once an action's signed transaction has actually been relayed
    * (escrow actions), or once a balance action's own final outcome is
@@ -107,7 +111,7 @@ type DisputeStep =
  * later), `submitBalancePayment` itself polls to a final on-chain result,
  * which can take up to the built transaction's own 5-minute timeout --
  * "Confirm with your passkey…" would sit there, wrong, for all of it. */
-type BalanceActionKind = "pay-balance" | "confirming-balance" | "mark-cash";
+type BalanceActionKind = "pay-balance" | "confirming-balance" | "mark-cash" | "mark-arrived";
 
 /**
  * The role-correct action buttons for one booking (Story 3.6): "Mark
@@ -133,6 +137,7 @@ export function BookingActions({
   balance,
   balanceState,
   slotStartsAt,
+  arrivedAt,
   session,
   onActionSubmitted,
   onUnauthorized,
@@ -343,6 +348,27 @@ export function BookingActions({
     }
   }
 
+  /** "Mark arrived" (provider only) -- the shop records when the client walks
+   * in, at or after the appointment start. No signature needed. */
+  async function handleMarkArrived(): Promise<void> {
+    if (!session || busyAction) return;
+    setBusyAction("mark-arrived");
+    setNotice(undefined);
+    try {
+      await markBookingArrived(id, session);
+      setNotice({ text: "Marked arrived." });
+      onActionSubmitted?.();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        onUnauthorized?.();
+        return;
+      }
+      setNotice({ text: describeFailure(error), alert: true });
+    } finally {
+      setBusyAction(undefined);
+    }
+  }
+
   const action = lifecycle.action;
   const isPending = Boolean(pendingAction);
   const canAct = Boolean(session) && escrowState === "locked" && !isPending;
@@ -354,6 +380,7 @@ export function BookingActions({
   const appointmentNotStarted = slotStartsAt === null || slotStartsAt > Math.floor(Date.now() / 1000);
   const canPayBalance = canAct && viewer === "client" && balanceState === "unpaid" && hasBalanceToPay && appointmentNotStarted && !verifyingBalance;
   const canMarkCash = canAct && viewer === "provider" && balanceState === "unpaid" && hasBalanceToPay;
+  const canMarkArrived = canAct && viewer === "provider" && arrivedAt === null && !appointmentNotStarted;
   const isBusy = busyAction !== undefined;
 
   if (isPending) {
@@ -373,9 +400,11 @@ export function BookingActions({
     !canDispute &&
     !canPayBalance &&
     !canMarkCash &&
+    !canMarkArrived &&
     !confirmingCash &&
     disputeStep.kind === "idle" &&
-    !notice
+    !notice &&
+    !arrivedAt
   ) {
     return null;
   }
@@ -455,6 +484,20 @@ export function BookingActions({
             Mark paid in person
           </button>
         </div>
+      )}
+
+      {canMarkArrived && !confirmingCash && disputeStep.kind === "idle" && (
+        <div className="booking-card__actions">
+          <button type="button" className="button-primary" disabled={isBusy} onClick={() => void handleMarkArrived()}>
+            {busyAction === "mark-arrived" ? "Marking…" : "Mark client arrived"}
+          </button>
+        </div>
+      )}
+
+      {arrivedAt && viewer === "client" && (
+        <p className="booking-card__notice" aria-live="polite">
+          Marked arrived
+        </p>
       )}
 
       {confirmingCash && (

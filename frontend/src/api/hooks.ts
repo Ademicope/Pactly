@@ -380,6 +380,10 @@ export function markBalancePaidCash(bookingId: string, session: Session): Promis
   return apiPost<{ ok: true }>(`/bookings/${bookingId}/balance/mark-cash`, {}, session.token);
 }
 
+export function markBookingArrived(bookingId: string, session: Session): Promise<{ ok: true }> {
+  return apiPost<{ ok: true }>(`/bookings/${bookingId}/arrived`, {}, session.token);
+}
+
 // ---------------------------------------------------------------------------
 // Story 2.4: local-currency deposit. Imperative like lock/fund -- each
 // step waits on a wallet signature, so these are plain async functions.
