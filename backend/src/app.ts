@@ -74,6 +74,7 @@ import {
   decideApplication,
   getOwnProviderApplication,
   listPendingApplications,
+  previewApplicationDeposit,
 } from "./services/providerApplications.js";
 import {
   BookingActionPendingError,
@@ -153,6 +154,13 @@ import {
   submitLocalDepositTrustline,
   type LocalDepositDeps,
 } from "./services/localDeposit.js";
+import {
+  InvalidReportReasonError,
+  ReportRateLimitError,
+  ShopNotFoundError,
+  getShopReportsForAdmin,
+  submitShopReport,
+} from "./services/shopReports.js";
 
 export interface Variables {
   /** Set by `requirePactlyAuth` once a request's Pactly JWT verifies --
@@ -655,6 +663,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         depositRateBps: typeof body?.depositRateBps === "number" ? body.depositRateBps : Number.NaN,
         cancellationWindowHours:
           typeof body?.cancellationWindowHours === "number" ? body.cancellationWindowHours : Number.NaN,
+        bufferMinutes: typeof body?.bufferMinutes === "number" ? body.bufferMinutes : 0,
       });
       return c.json(profile);
     } catch (error) {
@@ -708,11 +717,35 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  /** Live deposit the apply form shows -- price + rate in, escrow-asset
+   * amount out. A client-supplied `deposit` field is ignored; the server
+   * always recomputes. Out-of-range rate (or bad price) is 400 with no
+   * preview body. */
+  app.post("/me/provider/application/deposit-preview", requirePactlyAuth, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    const int = (value: unknown) => (typeof value === "number" ? value : Number.NaN);
+    try {
+      const deposit = previewApplicationDeposit({
+        priceAmount: text(body?.priceAmount),
+        depositRateBps: int(body?.depositRateBps),
+      });
+      return c.json({ deposit });
+    } catch (error) {
+      if (error instanceof InvalidProviderApplicationError) {
+        return c.json({ code: "INVALID_APPLICATION", message: error.message, details: error.details }, 400);
+      }
+      throw error;
+    }
+  });
+
   app.post("/me/provider/application", requirePactlyAuth, async (c) => {
     const body = await c.req.json().catch(() => undefined);
     const text = (value: unknown) => (typeof value === "string" ? value : "");
     const int = (value: unknown) => (typeof value === "number" ? value : Number.NaN);
     try {
+      // Price + rate only; any client-supplied deposit is ignored -- the
+      // service recomputes via computeDepositAmount on read.
       const application = await applyAsProvider(db, c.get("walletAddress"), {
         name: text(body?.name),
         title: text(body?.title),
@@ -900,6 +933,9 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  /** Booking detail for the owning client. Includes `serverTime` (UTC epoch
+   * seconds) alongside `cancelDeadline` so the free-cancellation countdown
+   * can follow the server clock and resync on every poll/refetch. */
   app.get("/bookings/:id", requirePactlyAuth, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
@@ -1665,6 +1701,52 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       throw error;
     }
+  });
+
+  // ---------------------------------------------------------------------
+  // Shop reports: clients can report a shop listing to admins.
+  // ---------------------------------------------------------------------
+
+  /** A signed-in client submits a report against an approved shop. Rate
+   * limited to once per day per shop. */
+  app.post("/providers/:id/report", requirePactlyAuth, async (c) => {
+    const providerProfileId = c.req.param("id");
+    if (!providerProfileId) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+    const body = await c.req.json().catch(() => undefined);
+    const reason = typeof body?.reason === "string" ? body.reason : "";
+    
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const result = await submitShopReport(
+        db,
+        {
+          providerProfileId,
+          reportedByWallet: c.get("walletAddress"),
+          reason,
+        },
+        now,
+      );
+      return c.json(result, 201);
+    } catch (error) {
+      if (error instanceof ShopNotFoundError) {
+        return c.json({ code: "SHOP_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof InvalidReportReasonError) {
+        return c.json({ code: "INVALID_REASON", message: error.message }, 400);
+      }
+      if (error instanceof ReportRateLimitError) {
+        return c.json({ code: "RATE_LIMIT", message: error.message }, 429);
+      }
+      throw error;
+    }
+  });
+
+  /** Admins list all shop reports, newest first. */
+  app.get("/admin/shop-reports", requirePactlyAuth, requireAdmin, async (c) => {
+    const reports = await getShopReportsForAdmin(db);
+    return c.json({ reports });
   });
 
   return app;

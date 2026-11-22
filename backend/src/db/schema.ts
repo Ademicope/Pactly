@@ -79,6 +79,9 @@ export const providerProfiles = sqliteTable("provider_profiles", {
   priceAmount: text("price_amount").notNull(),
   depositRateBps: integer("deposit_rate_bps").notNull(),
   cancellationWindowHours: integer("cancellation_window_hours").notNull(),
+  /** Minutes kept free after a locked booking before another slot may be
+   * offered (0-120). Does not change weekly hours or move existing locks. */
+  bufferMinutes: integer("buffer_minutes").notNull().default(0),
   isApproved: integer("is_approved", { mode: "boolean" }).notNull().default(false),
   /** Increases only when a booking's deposit is reconciled as released
    * (FR20); never written by hand outside the reconciler/event worker's own
@@ -653,4 +656,20 @@ export const escrowDisputeOpenings = sqliteTable("escrow_dispute_openings", {
    * `cancelDeadline`, which `suggestedOutcome`'s own client-cancel branch
    * compares it against). */
   openedAt: integer("opened_at").notNull(),
+});
+
+/**
+ * Shop reports: a signed-in client can report a shop listing to admins.
+ * One report per client per shop per day. Does not change the shop's status.
+ */
+export const shopReports = sqliteTable("shop_reports", {
+  id: text("id").primaryKey(),
+  providerProfileId: text("provider_profile_id")
+    .notNull()
+    .references(() => providerProfiles.id),
+  reportedByWallet: text("reported_by_wallet").notNull(),
+  /** The report reason, capped at 500 characters. */
+  reason: text("reason").notNull(),
+  /** UTC epoch seconds. */
+  createdAt: integer("created_at").notNull(),
 });

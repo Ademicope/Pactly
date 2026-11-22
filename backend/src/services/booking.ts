@@ -4,13 +4,16 @@
  * and this module only composes the two -- the layering the whole backend
  * is written against (routes -> services -> db/escrow/anchor, one-way).
  *
- * What is deliberately *not* here: nothing in this file ever sets
+ * What is deliberately *not* here: nothing in this file invents an
  * `escrow_state`. That column belongs to `../escrow/trustless-work/
  * reconciler.ts` alone (AD-1/AD-3, Story 2.6's retarget of
  * `../chain/event-worker.ts`); `lockDeposit` and `fundDeposit` below only
  * ever build unsigned XDR -- the booking's `escrowState` stays `null`
  * until the reconciler processes chain-confirmed evidence that the
- * resulting signed-and-submitted transactions actually landed.
+ * resulting signed-and-submitted transactions actually landed. The one
+ * exception is `releaseDeposit`, which mirrors an *already recorded*
+ * chain-derived `"released"` transition onto `escrow_state` when that write
+ * had not landed yet -- never a transition of its own.
  *
  * `lockDeposit`/`fundDeposit`/`resolveBookingDispute` no longer call
  * `../chain/client.ts` (Story 2.6): that module is superseded, not deleted
@@ -72,10 +75,16 @@ import {
   setPendingDispute,
   updateBalanceState,
   updateEscrowContractId,
+  updateEscrowStateIfNotTerminalSync,
   type BookingRow,
   type EscrowActionKind,
 } from "../db/bookings.js";
-import { getSlotById, getSlotByProviderAndStart, listOpenSlotsInRange } from "../db/availabilitySlots.js";
+import { getSlotById, getSlotByProviderAndStart } from "../db/availabilitySlots.js";
+import {
+  isSlotInsideBufferAfterLocked,
+  listLockedBookingStarts,
+  listOfferedSlotsInRange,
+} from "./availability.js";
 import { recordEscrowDisputeResolution } from "../db/escrowDisputeResolutions.js";
 import { getEscrowDisputeOpeningsForBookings, recordEscrowDisputeOpening } from "../db/escrowDisputeOpenings.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
@@ -209,11 +218,11 @@ export class SlotTakenError extends Error {
   }
 }
 
-/** Review follow-up: a per-wallet cap on *pending* holds (not yet locked)
- * across every provider, so one wallet cannot tie up an unbounded number of
- * slots at once. */
+/** Review follow-up (Issue #51): a per-wallet cap on *pending* holds (not
+ * yet locked) across every provider, so one wallet cannot tie up an
+ * unbounded number of slots at once. The limit is 3 open holds. */
 export class TooManyHoldsError extends Error {
-  constructor(message = "You already have too many slots on hold. Complete or let one expire first.") {
+  constructor(message = "You already have 3 slots on hold. Complete or let one expire before holding another.") {
     super(message);
     this.name = "TooManyHoldsError";
   }
@@ -261,6 +270,10 @@ export interface HoldSlotResult {
   balance: Money;
   price: Money;
   cancelDeadline: number;
+  /** UTC epoch seconds -- the server clock at response time. The client
+   * drives its free-cancellation countdown from this plus
+   * `cancelDeadline`, never from the browser clock alone. */
+  serverTime: number;
   provider: BookingProviderSummary;
   /** `true` only when `cancelDeadline` has already passed at hold time --
    * the deposit is still locked as normal, but there is no free
@@ -321,6 +334,23 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
     throw new SlotUnavailableError();
   }
 
+  // A slot inside the post-lock buffer is not offered -- refuse the hold the
+  // same way as an unknown/past slot so a stale deep-link cannot claim it.
+  if (profile.bufferMinutes > 0) {
+    const lockedStarts = await listLockedBookingStarts(db, profile.id);
+    const blocked = lockedStarts.some((lockedStartsAt) =>
+      isSlotInsideBufferAfterLocked(
+        input.slotStartsAt,
+        lockedStartsAt,
+        profile.sessionLengthMinutes,
+        profile.bufferMinutes,
+      ),
+    );
+    if (blocked) {
+      throw new SlotUnavailableError();
+    }
+  }
+
   const provider: BookingProviderSummary = { id: profile.id, displayName: profile.displayName, title: profile.title };
 
   // Review follow-up: the same wallet asking to hold a slot it already
@@ -336,6 +366,7 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
       balance: { amount: existing.balanceAmount, asset: ASSET },
       price: { amount: (BigInt(existing.depositAmount) + BigInt(existing.balanceAmount)).toString(), asset: ASSET },
       cancelDeadline: existing.cancelDeadline,
+      serverTime: now,
       provider,
       ...(existing.cancelDeadline <= now ? { freeCancellationEnded: true as const } : {}),
     };
@@ -374,7 +405,15 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
 
   if (!inserted) {
     const { start, end } = dayRange(input.slotStartsAt, input.tzOffsetMinutes);
-    const sameDaySlots = await listOpenSlotsInRange(db, profile.id, start, end, now);
+    const sameDaySlots = await listOfferedSlotsInRange(
+      db,
+      profile.id,
+      start,
+      end,
+      profile.sessionLengthMinutes,
+      profile.bufferMinutes,
+      now,
+    );
     throw new SlotTakenError(sameDaySlots.filter((startsAt) => startsAt !== input.slotStartsAt));
   }
 
@@ -385,6 +424,7 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
     balance: { amount: balanceAmount, asset: ASSET },
     price: { amount: profile.priceAmount, asset: ASSET },
     cancelDeadline,
+    serverTime: now,
     provider,
     ...(cancelDeadline <= now ? { freeCancellationEnded: true as const } : {}),
   };
@@ -833,27 +873,55 @@ export async function approveAppointment(
 }
 
 /**
- * "Release" (provider only, self-claim): refused (typed
- * {@link BookingEscrowStateError}) unless the reconciler's own latest
- * recorded lifecycle action is exactly `"approved"` -- per the spec's own
- * role map row ("release: provider wallet (release signer), only when the
- * latest lifecycle is approved and not disputed"). A dispute opened after
- * approval would itself become the *latest* recorded action (the
- * reconciler's own rank puts `disputed` above `approved`), so checking for
- * `"approved"` alone already excludes that case -- no separate "not
- * disputed" check is needed.
+ * "Release" (provider only, self-claim):
+ *
+ * - Once the reconciler's own chain-derived lifecycle shows the release
+ *   already applied (`"released"`, or the booking is already `released`),
+ *   this marks the booking released (when that write had not landed yet)
+ *   and returns `{ status: "applied" }` **without building or submitting
+ *   anything** -- a second click can never submit a second release against
+ *   an escrow that already paid.
+ * - Otherwise, refused (typed {@link BookingEscrowStateError}) unless the
+ *   latest recorded lifecycle action is exactly `"approved"` -- per the
+ *   spec's own role map row ("release: provider wallet (release signer),
+ *   only when the latest lifecycle is approved and not disputed"). A
+ *   dispute opened after approval would itself become the *latest*
+ *   recorded action (the reconciler's own rank puts `disputed` above
+ *   `approved`), so checking for `"approved"` alone already excludes that
+ *   case -- no separate "not disputed" check is needed.
+ *
+ * A release that was already signed and relayed (`escrowReleaseSubmittedAt`
+ * set) but has not been applied on chain is retryable: this rebuilds a
+ * release XDR against the *same* `escrowContractId`, so the retry can never
+ * point at a different escrow. Once the chain-confirmed `"released"`
+ * evidence is recorded, that retry path is refused (returns `"applied"`)
+ * and no adapter call happens at all.
  */
+export type ReleaseDepositResult =
+  | { status: "ready"; contractId: string; unsignedXdr: string; txHash: string }
+  | { status: "applied"; contractId: string };
+
 export async function releaseDeposit(
   db: Db,
   bookingId: string,
   providerWalletAddress: string,
   adapter: EscrowAdapter = defaultEscrowAdapter,
-): Promise<UnsignedTransaction> {
+): Promise<ReleaseDepositResult> {
   const booking = await getBookingForProvider(db, bookingId, providerWalletAddress);
-  if (booking.escrowState !== "locked" || !booking.escrowContractId) {
+  if (!booking.escrowContractId) {
     throw new BookingEscrowStateError(
       `Booking "${bookingId}" must be locked with a persisted escrow contractId to release it (escrowState is "${booking.escrowState}")`,
     );
+  }
+
+  // Already released, by the booking's own state or by the reconciler's
+  // chain-derived lifecycle. Mirror a lifecycle-confirmed release onto
+  // `escrow_state` when that write had not landed yet, then return without
+  // touching the adapter -- the deposit has already moved. This check sits
+  // before the `locked`/`approved` guards on purpose: a booking whose chain
+  // evidence is ahead of its stored state must never look releasable again.
+  if (booking.escrowState === "released") {
+    return { status: "applied", contractId: booking.escrowContractId };
   }
   const lifecycle = await getEscrowLifecycle(db, bookingId);
   if (lifecycle?.contractId !== booking.escrowContractId) {
@@ -861,17 +929,32 @@ export async function releaseDeposit(
       `Booking "${bookingId}" has no chain-confirmed evidence yet for its current escrow contractId`,
     );
   }
-  if (booking.escrowReleaseSubmittedAt !== null && lifecycle.action === "approved") {
-    throw new BookingActionPendingError();
+  if (lifecycle.action === "released") {
+    // `updateEscrowStateIfNotTerminalSync` is the reconciler's own writer:
+    // this mirrors evidence the reconciler has already recorded, never
+    // invents a chain transition (AD-1).
+    updateEscrowStateIfNotTerminalSync(db, bookingId, "released");
+    return { status: "applied", contractId: booking.escrowContractId };
+  }
+
+  if (booking.escrowState !== "locked") {
+    throw new BookingEscrowStateError(
+      `Booking "${bookingId}" must be locked with a persisted escrow contractId to release it (escrowState is "${booking.escrowState}")`,
+    );
   }
   if (lifecycle.action !== "approved") {
     throw new BookingEscrowStateError(
       `Booking "${bookingId}" cannot be released from its current lifecycle state ("${lifecycle.action}"); it must be "approved"`,
     );
   }
+
+  // A previously signed-but-unapplied release is retried here, on the same
+  // persisted contractId. `escrowReleaseSubmittedAt` deliberately does not
+  // block this: the retry exists precisely for that in-flight case, and the
+  // chain-applied check above is what refuses a retry after success.
   const result = await adapter.release({ contractId: booking.escrowContractId, providerAddress: providerWalletAddress });
   await setEscrowActionTxHash(db, bookingId, "release", result.txHash);
-  return result;
+  return { status: "ready", contractId: booking.escrowContractId, ...result };
 }
 
 /**
@@ -1423,6 +1506,10 @@ export interface BookingView {
   price: Money;
   slotStartsAt: number | null;
   cancelDeadline: number;
+  /** UTC epoch seconds -- the server clock at response time. Resynced on
+   * every refetch so the client's free-cancellation countdown stays
+   * aligned with the clock that will actually accept or refuse a cancel. */
+  serverTime: number;
   provider: BookingProviderSummary;
   /** Story 3.7: the on-chain transaction hash once the balance was paid
    * through Pactly (`null` otherwise -- unpaid, or paid in cash, which has
@@ -1442,7 +1529,12 @@ export interface BookingView {
  * chain-derived lifecycle, and a small provider summary. The UI is told
  * `locked` only from here (`escrowState`), never from a submit response
  * (spec's own "Always" rule). */
-export async function getBookingView(db: Db, bookingId: string, walletAddress: string): Promise<BookingView> {
+export async function getBookingView(
+  db: Db,
+  bookingId: string,
+  walletAddress: string,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<BookingView> {
   const booking = await getBookingForClient(db, bookingId, walletAddress);
   const profile = await getProviderProfileById(db, booking.providerProfileId);
   const lifecycle = (await getEscrowLifecycle(db, bookingId)) ?? {};
@@ -1461,6 +1553,7 @@ export async function getBookingView(db: Db, bookingId: string, walletAddress: s
     price: { amount: (BigInt(booking.depositAmount) + BigInt(booking.balanceAmount)).toString(), asset: ASSET },
     slotStartsAt,
     cancelDeadline: booking.cancelDeadline,
+    serverTime: now,
     provider: profile
       ? { id: profile.id, displayName: profile.displayName, title: profile.title }
       : { id: booking.providerProfileId, displayName: "", title: "" },
@@ -1719,6 +1812,8 @@ export interface BookingListItemBase {
    * through Pactly (`null` for unpaid or paid-in-cash). */
   balancePaymentTxHash: string | null;
   cancelDeadline: number;
+  /** UTC epoch seconds -- the server clock at response time. */
+  serverTime: number;
   contractId: string | null;
   holdExpiresAt: number | null;
   /** The AD-13 hold's own 10-minute window has passed with `escrowState`
@@ -1781,6 +1876,7 @@ function toBookingListItemBase(
     balanceState: booking.balanceState,
     balancePaymentTxHash: booking.balancePaymentTxHash,
     cancelDeadline: booking.cancelDeadline,
+    serverTime: now,
     contractId: booking.escrowContractId,
     holdExpiresAt: booking.holdExpiresAt,
     isExpiredHold: isExpiredHoldRow(booking, now),

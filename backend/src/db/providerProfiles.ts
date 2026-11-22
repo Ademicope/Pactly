@@ -22,6 +22,7 @@ export interface NewProviderProfile {
   priceAmount: string;
   depositRateBps: number;
   cancellationWindowHours: number;
+  bufferMinutes?: number;
   isApproved?: boolean;
   /** Issue #2: seed-only. A real profile starts at 0 and only ever moves
    * through the reconciler's own once-only writes -- the demo seeder is the
@@ -46,6 +47,7 @@ export async function insertProviderProfile(db: Db, values: NewProviderProfile):
     priceAmount: values.priceAmount,
     depositRateBps: values.depositRateBps,
     cancellationWindowHours: values.cancellationWindowHours,
+    bufferMinutes: values.bufferMinutes ?? 0,
     isApproved: values.isApproved ?? false,
     verifiedSessionCount: values.verifiedSessionCount ?? 0,
     providerCancellationCount: values.providerCancellationCount ?? 0,
@@ -172,6 +174,7 @@ export async function listApprovedProviderProfilesForDiscover(
       priceAmount: providerProfiles.priceAmount,
       depositRateBps: providerProfiles.depositRateBps,
       cancellationWindowHours: providerProfiles.cancellationWindowHours,
+      bufferMinutes: providerProfiles.bufferMinutes,
       isApproved: providerProfiles.isApproved,
       verifiedSessionCount: providerProfiles.verifiedSessionCount,
       providerCancellationCount: providerProfiles.providerCancellationCount,
@@ -187,6 +190,7 @@ export interface ProviderRulesValues {
   priceAmount: string;
   depositRateBps: number;
   cancellationWindowHours: number;
+  bufferMinutes: number;
 }
 
 /** `services/profile.ts`'s `updateProviderRules` write path -- the one
@@ -243,6 +247,7 @@ export async function updateProviderProfileRules(db: Db, id: string, values: Pro
       priceAmount: values.priceAmount,
       depositRateBps: values.depositRateBps,
       cancellationWindowHours: values.cancellationWindowHours,
+      bufferMinutes: values.bufferMinutes,
     })
     .where(eq(providerProfiles.id, id));
   if (result.changes === 0) {
