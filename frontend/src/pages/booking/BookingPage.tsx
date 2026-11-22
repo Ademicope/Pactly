@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router";
 
 import {
   fundDepositWithRetry,
+  getBooking,
   getLocalDeposit,
   lockDeposit,
   openLocalDeposit,
@@ -16,7 +17,7 @@ import {
   verifyAnchorChallenge,
 } from "../../api/hooks";
 import { ApiError } from "../../api/client";
-import type { HoldSlotResponse, LocalDepositView } from "../../api/types";
+import type { BookingView, HoldSlotResponse, LocalDepositView } from "../../api/types";
 import { DepositPill } from "../../components/DepositPill";
 import { EscrowLane } from "../../components/EscrowLane";
 import { LocalCurrencyPanel, localDepositErrorMessage } from "../../components/LocalCurrencyPanel";
@@ -113,6 +114,13 @@ export function BookingPage() {
   const [localBusy, setLocalBusy] = useState(false);
   const [localNotice, setLocalNotice] = useState<string | undefined>();
 
+  // Issue #5/#7: what `GET /bookings/:id` says about this booking the moment
+  // the hold comes back -- whether a deploy behind the stored contract id is
+  // already confirmed, and every contract id the booking has had. Read once,
+  // before the client taps anything; `useBooking` below is a different read
+  // that only starts once *this* tab has submitted a fund.
+  const [bookingFacts, setBookingFacts] = useState<BookingView | undefined>();
+
   // Review follow-up: the flow's own "engine" state (which contractId is in
   // play, whether a deploy has actually been submitted) lives in a ref, not
   // in React state read through a closure -- `runLockFlow` and
@@ -128,6 +136,7 @@ export function BookingPage() {
   const reconcileStartedAtRef = useRef<number | undefined>(undefined);
 
   const resumeAttemptedRef = useRef(false);
+  const bookingFactsReadRef = useRef(false);
   const formatTryAmount = useFormatTry();
 
   const isLocked = phase === "locked";
@@ -251,10 +260,52 @@ export function BookingPage() {
     };
   }, [hold, session]);
 
+  // Issue #5: a booking can come back with its escrow already created and
+  // no deposit in it -- the fund signature was declined, the tab was closed
+  // between the two steps, the client is continuing from My bookings. Read
+  // that once when the hold returns so the screen knows before the client
+  // taps anything, and the step it offers is funding the escrow that exists,
+  // never a second deploy. A read that fails, or a booking with no contract
+  // id, leaves the default in place: start at the deploy.
+  useEffect(() => {
+    if (!hold || !session || bookingFactsReadRef.current) return;
+    bookingFactsReadRef.current = true;
+    let cancelled = false;
+    void getBooking(hold.bookingId, session)
+      .then((view) => {
+        if (cancelled) return;
+        setBookingFacts(view);
+        if (!view.deploySubmitted || view.escrowState !== null || !view.contractId) return;
+        // Never overwrite a flow this tab already started.
+        if (inFlightRef.current || engineRef.current.contractId) return;
+        engineRef.current = { contractId: view.contractId, deploySubmittedAtMs: Date.now() };
+        setPhase("deployed");
+      })
+      .catch(() => {
+        /* No facts to seed -- the flow keeps its default start. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hold, session]);
+
   function handleUnauthorized(): void {
     signOut();
     setSession(undefined);
     setNeedsSignIn(true);
+  }
+
+  /** Issue #7: a deploy that replaced an earlier one has just changed this
+   * booking's escrow history -- re-read it so the id the client lost track
+   * of is on screen right away, not only once this tab goes on to submit a
+   * fund and the confirmation poll starts. */
+  function refreshBookingFacts(): void {
+    if (!hold || !session) return;
+    void getBooking(hold.bookingId, session)
+      .then((view) => setBookingFacts(view))
+      .catch(() => {
+        /* the last known facts stay on screen */
+      });
   }
 
   async function ensureSessionAndHold() {
@@ -328,6 +379,23 @@ export function BookingPage() {
       handleUnauthorized();
       return;
     }
+    // Issue #6: this booking's first deploy is already running on another
+    // request -- that one wins, nothing was deployed here, and the client
+    // waiting a moment is the whole answer. Not a failure to warn about.
+    if (error instanceof ApiError && error.code === "DEPLOY_IN_FLIGHT") {
+      setPhase("idle");
+      setFlowNotice(error.message);
+      return;
+    }
+    // Issue #5: the fund transaction built for this booking's stored
+    // contract id has already settled, so the deposit is in and a second one
+    // is never built. What is left is waiting for the confirmation -- the
+    // same poll any other submit ends on, never a claim of `locked` here.
+    if (error instanceof ApiError && error.code === "DEPOSIT_LANDED") {
+      setPendingSignature(undefined);
+      setPhase("reconciling");
+      return;
+    }
     const described = describeError(error);
     setFlowFatalError(described.message);
     if (error instanceof ApiError && error.code === "HOLD_EXPIRED") {
@@ -393,6 +461,7 @@ export function BookingPage() {
           }
           engineRef.current.deploySubmittedAtMs = Date.now();
           setPendingSignature(undefined);
+          refreshBookingFacts();
         }
       }
 
@@ -457,6 +526,7 @@ export function BookingPage() {
         }
         engineRef.current.deploySubmittedAtMs = Date.now();
         setPendingSignature(undefined);
+        refreshBookingFacts();
         // Kept guarded (the `finally` below releases it) through the fund
         // step too -- releasing early here would open a window for a
         // concurrent call to re-enter while it is still running.
@@ -628,6 +698,16 @@ export function BookingPage() {
   const waitingOn =
     phase === "awaiting-deploy-signature" ? "Create your escrow" : phase === "awaiting-fund-signature" ? "Lock your deposit" : undefined;
   const busy = phase !== "idle" && phase !== "deployed" && phase !== "deploy-failed";
+  // Issue #6: "the button disables itself for the whole in-flight request"
+  // -- every lock step's own button, including the two "Try again" buttons
+  // that stand in for it, stays disabled from the tap until the request it
+  // started has settled.
+  const lockInFlight = busy || waitingOn !== undefined;
+  // Issue #5: with a deploy already confirmed, the action left is funding
+  // the escrow that exists -- say that on the button instead of offering a
+  // second deploy.
+  const actionLabel = phase === "deployed" ? "Continue funding" : undefined;
+  const depositFacts = booking.data ?? bookingFacts;
 
   return (
     <div className="page booking-page">
@@ -746,13 +826,14 @@ export function BookingPage() {
                   <>
                     <p className="booking-step">Step 3 · Lock the deposit</p>
                     {phase === "deploy-failed" ? (
-                      <button type="button" className="button-primary" onClick={tryAgainAfterFailedDeploy}>
+                      <button type="button" className="button-primary" disabled={lockInFlight} onClick={tryAgainAfterFailedDeploy}>
                         Try again
                       </button>
                     ) : (
                       <LockButton
                         waitingOn={waitingOn}
-                        disabled={busy && !waitingOn}
+                        actionLabel={actionLabel}
+                        disabled={lockInFlight}
                         onClick={() => void runLockFlow()}
                         onOpenWalletAgain={() => void retryPendingSignature()}
                       />
@@ -775,17 +856,20 @@ export function BookingPage() {
           contractId={engineRef.current.contractId}
           showProof={isLocked}
           stateLabel={!hold ? "Hold the slot to pay" : escrowStateLabel(phase)}
+          stateDetail={escrowStateDetail(phase)}
+          contractHistory={depositFacts?.contractHistory}
         >
           {showLock && !isLocked && (
             <>
               {phase === "deploy-failed" ? (
-                <button type="button" className="button-escrow" onClick={tryAgainAfterFailedDeploy}>
+                <button type="button" className="button-escrow" disabled={lockInFlight} onClick={tryAgainAfterFailedDeploy}>
                   Try again
                 </button>
               ) : (
                 <LockButton
                   waitingOn={waitingOn}
-                  disabled={busy && !waitingOn}
+                  actionLabel={actionLabel}
+                  disabled={lockInFlight}
                   onClick={() => void runLockFlow()}
                   onOpenWalletAgain={() => void retryPendingSignature()}
                 />
@@ -870,7 +954,7 @@ function escrowStateLabel(phase: DisplayPhase): string {
     case "deploy-failed":
       return "Your escrow could not be created";
     case "deployed":
-      return "Escrow created · not yet funded";
+      return "Escrow created";
     case "building-fund":
       return "Locking with Pactly…";
     case "awaiting-fund-signature":
@@ -883,4 +967,13 @@ function escrowStateLabel(phase: DisplayPhase): string {
     case "locked":
       return "Locked";
   }
+}
+
+/** Issue #5: the other half of the `deployed` state gets its own line
+ * rather than being folded into the label with a separator -- "an escrow
+ * was created" and "your deposit is not in it yet" are two facts the
+ * client reads separately, and only the second one is what the button
+ * below is about. Every other phase has one fact, so it has no detail. */
+function escrowStateDetail(phase: DisplayPhase): string | undefined {
+  return phase === "deployed" ? "Your deposit is not in it yet." : undefined;
 }
