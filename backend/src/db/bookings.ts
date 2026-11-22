@@ -4,7 +4,7 @@
  * `../chain/event-worker.ts` -- which is what AD-1/AD-3 mean in practice:
  * nothing else may write `escrow_state`.
  */
-import { and, eq, gt, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 
 import type { Db, DbOrTx } from "./client.js";
 import {
@@ -225,6 +225,64 @@ export async function updateBalanceState(db: Db, id: string, balanceState: Balan
   }
 }
 
+/** Issue #6: how long a first-deploy claim is honored before a later lock
+ * request may take it over. Generous enough to outlast any single escrow
+ * deploy call, and bounded because a claim that never expired would wedge
+ * the booking out of ever deploying if the request holding it died (a
+ * crashed process, a dropped connection) between taking the claim and
+ * persisting a `contractId`. */
+export const ESCROW_LOCK_CLAIM_STALE_AFTER_SECONDS = 120;
+
+/**
+ * Issue #6: takes the one in-flight first-deploy claim for this booking, in
+ * the same conditioned `UPDATE` style {@link insertBookingHoldIfSlotFree}
+ * already uses for the slot hold -- the "at most one deploy in flight per
+ * booking" rule is enforced by SQLite in one statement, never by a
+ * check-then-act a second concurrent caller can interleave with. Unlike
+ * {@link updateEscrowContractId}'s own guarded write, which only lands
+ * *after* the escrow adapter has already been called (so two racing
+ * requests both deployed and one lost), this is taken *before* the call,
+ * which is what keeps the deploy itself single.
+ *
+ * Claimable only while the booking still has no `escrowState` and no
+ * `contractId` (the same precondition the deploy itself has), and either no
+ * claim at all or one older than {@link ESCROW_LOCK_CLAIM_STALE_AFTER_SECONDS}.
+ * Returns `true` when this caller now holds the claim, `false` when another
+ * request holds a fresh one (or the booking has moved on) -- the caller
+ * returns the booking's own current state rather than deploying.
+ */
+export async function claimEscrowLock(db: Db, id: string, claimToken: string, now: number): Promise<boolean> {
+  const result = await db
+    .update(bookings)
+    .set({ escrowLockClaimToken: claimToken, escrowLockClaimedAt: now })
+    .where(
+      and(
+        eq(bookings.id, id),
+        isNull(bookings.escrowState),
+        isNull(bookings.escrowContractId),
+        or(
+          isNull(bookings.escrowLockClaimedAt),
+          lte(bookings.escrowLockClaimedAt, now - ESCROW_LOCK_CLAIM_STALE_AFTER_SECONDS),
+        ),
+      ),
+    );
+  return result.changes > 0;
+}
+
+/** Releases the claim only if `claimToken` is still the one holding it -- so
+ * a slow request whose claim was already taken over (or already persisted a
+ * `contractId`, which clears the claim in that same write) can never release
+ * someone else's. Called when a deploy fails, so "a failed deploy that
+ * stored no contract id can be retried" stays true without waiting out the
+ * stale window. Returns `true` when this caller's own claim was released. */
+export async function releaseEscrowLock(db: Db, id: string, claimToken: string): Promise<boolean> {
+  const result = await db
+    .update(bookings)
+    .set({ escrowLockClaimToken: null, escrowLockClaimedAt: null })
+    .where(and(eq(bookings.id, id), eq(bookings.escrowLockClaimToken, claimToken)));
+  return result.changes > 0;
+}
+
 /** `services/booking.ts`'s `lockDeposit` write path: persists the escrow's
  * predicted `contractId` the moment the deploy XDR is built -- once, ever,
  * per booking. The write itself is conditioned in SQL (`WHERE id = ? AND
@@ -258,7 +316,17 @@ export async function updateEscrowContractId(
 ): Promise<void> {
   const result = await db
     .update(bookings)
-    .set({ escrowContractId: contractId, escrowDeployXdr: unsignedXdr ?? null, escrowDeployTxHash: txHash ?? null })
+    .set({
+      escrowContractId: contractId,
+      escrowDeployXdr: unsignedXdr ?? null,
+      escrowDeployTxHash: txHash ?? null,
+      // Issue #6: the deploy is no longer in flight -- this booking now has
+      // a persisted contractId, so the claim taken for it is released in
+      // this same atomic write (every later lock call returns from the
+      // persisted row instead).
+      escrowLockClaimToken: null,
+      escrowLockClaimedAt: null,
+    })
     .where(and(eq(bookings.id, id), isNull(bookings.escrowState), isNull(bookings.escrowContractId)));
   if (result.changes === 0) {
     throw new TypeError(

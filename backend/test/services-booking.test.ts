@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 
-import { BookingEscrowStateError, fundDeposit, lockDeposit, resolveBookingDispute, setBalanceState } from "../src/services/booking.js";
+import { BookingDeployInFlightError, BookingEscrowStateError, fundDeposit, lockDeposit, resolveBookingDispute, setBalanceState } from "../src/services/booking.js";
 import { getEscrowDisputeResolution } from "../src/db/escrowDisputeResolutions.js";
 import { getBookingById, recordDeploySubmission, updateEscrowContractId, updateEscrowStateSync } from "../src/db/bookings.js";
 import { bookings } from "../src/db/schema.js";
@@ -258,7 +258,7 @@ test("lockDeposit ignores rebuild: true once a deploy submission is already reco
   }
 });
 
-test("lockDeposit: two concurrent first-deploy calls never let a raw TypeError escape -- one wins, the other returns its result", async () => {
+test("lockDeposit: two concurrent first-deploy calls deploy exactly once -- the loser refuses as already in flight", async () => {
   const result = openTestDatabase();
   try {
     const bookingId = await seedBooking(result);
@@ -272,17 +272,95 @@ test("lockDeposit: two concurrent first-deploy calls never let a raw TypeError e
       },
     };
 
-    const [first, second] = await Promise.all([lockDeposit(result.db, bookingId, adapter), lockDeposit(result.db, bookingId, adapter)]);
-    // Both calls can legitimately race to build a deploy (each reads
-    // `contractId: null` before either has written) -- the guarantee is at
-    // the *write*: only one persists, and neither call ever throws a raw,
-    // untyped error. Both must end up agreeing on the same, single
-    // persisted contractId.
-    assert.ok(deployCalls >= 1);
-    assert.equal(first.contractId, contractId);
-    assert.equal(second.contractId, contractId);
+    const [first, second] = await Promise.allSettled([
+      lockDeposit(result.db, bookingId, adapter),
+      lockDeposit(result.db, bookingId, adapter),
+    ]);
+    // Issue #6: the claim is taken *before* the adapter call, so the second
+    // request never reaches it -- exactly one escrow is built for this
+    // booking. The winner returns the deploy to sign; the loser names the
+    // same booking and refuses, never a raw, untyped error.
+    assert.equal(deployCalls, 1);
+    const fulfilled = [first, second].filter((outcome) => outcome.status === "fulfilled");
+    assert.equal(fulfilled.length, 1, "exactly one of the two concurrent calls builds the deploy");
+    for (const outcome of [first, second]) {
+      if (outcome.status === "fulfilled") {
+        assert.deepEqual(outcome.value, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
+      } else {
+        assert.ok(outcome.reason instanceof BookingDeployInFlightError, "the loser gets a typed refusal, never a raw error");
+        assert.equal(outcome.reason.bookingId, bookingId);
+      }
+    }
+
     const booking = await getBookingById(result.db, bookingId);
     assert.equal(booking?.escrowContractId, contractId);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("lockDeposit: once the claimant has persisted its deploy, a later call returns that same contractId with no second deploy", async () => {
+  const result = openTestDatabase();
+  try {
+    const bookingId = await seedBooking(result);
+    const contractId = fakeContractId();
+    let deployCalls = 0;
+    const adapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      deploy: async () => {
+        deployCalls += 1;
+        // Asked for the same booking while this deploy is still in flight.
+        await assert.rejects(
+          () => lockDeposit(result.db, bookingId, adapter),
+          (error: unknown) => error instanceof BookingDeployInFlightError,
+        );
+        return { contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" };
+      },
+    };
+
+    const first = await lockDeposit(result.db, bookingId, adapter);
+    assert.deepEqual(first, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
+
+    const retry = await lockDeposit(result.db, bookingId, unreachableEscrowAdapter());
+    assert.deepEqual(retry, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
+    assert.equal(deployCalls, 1, "a request after the contractId is stored returns it, never a second deploy");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("lockDeposit: a failed deploy releases its claim so the client can retry immediately, and two different bookings still deploy in parallel (issue #6)", async () => {
+  const result = openTestDatabase();
+  try {
+    const bookingId = await seedBooking(result);
+    const otherBookingId = await seedBooking(result);
+    const contractId = fakeContractId();
+    let attempt = 0;
+    const failingThenWorkingAdapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      deploy: async () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("escrow is unavailable");
+        return { contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" };
+      },
+    };
+
+    await assert.rejects(() => lockDeposit(result.db, bookingId, failingThenWorkingAdapter));
+    const retried = await lockDeposit(result.db, bookingId, failingThenWorkingAdapter);
+    assert.deepEqual(retried, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
+
+    // The claim is per booking, never global: a second booking's deploy is
+    // not held up by the first one's.
+    const otherContractId = fakeContractId();
+    const [storedAgain, other] = await Promise.all([
+      lockDeposit(result.db, bookingId, unreachableEscrowAdapter()),
+      lockDeposit(result.db, otherBookingId, {
+        ...unreachableEscrowAdapter(),
+        deploy: async () => ({ contractId: otherContractId, unsignedXdr: "other-xdr", txHash: "other-tx-hash" }),
+      }),
+    ]);
+    assert.deepEqual(storedAgain, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
+    assert.deepEqual(other, { deployed: false, contractId: otherContractId, unsignedXdr: "other-xdr", txHash: "other-tx-hash" });
   } finally {
     closeDatabase(result);
   }

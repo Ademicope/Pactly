@@ -190,6 +190,22 @@ export const bookings = sqliteTable("bookings", {
    */
   escrowContractId: text("escrow_contract_id"),
   /**
+   * Issue #6: the in-flight first-deploy claim's own token. `lockDeposit`
+   * takes this claim with one conditioned `UPDATE` *before* it calls the
+   * escrow adapter (see `db/bookings.ts`'s `claimEscrowLock`), so two
+   * requests for the same booking can never both reach `deploy` -- unlike
+   * the `escrowContractId` write below it, which only lands *after* the
+   * adapter call and so could never keep the deploy itself single. Cleared
+   * in the same write that persists a `contractId`, and released again if
+   * the deploy fails, so a failed deploy stays retryable.
+   */
+  escrowLockClaimToken: text("escrow_lock_claim_token"),
+  /** UTC epoch seconds `escrow_lock_claim_token` was taken at -- a claim
+   * older than the stale window (see `claimEscrowLock`) is treated as
+   * abandoned, since a request whose process died mid-deploy would
+   * otherwise lock the booking out of ever deploying. */
+  escrowLockClaimedAt: integer("escrow_lock_claimed_at"),
+  /**
    * Story 3.4: the AD-13 slot hold's own slot (3.1's `availability_slots`).
    * `null` only for a booking inserted before this column existed (Story
    * 2.6-era tests and rows) -- every booking `holdSlot` creates from here on

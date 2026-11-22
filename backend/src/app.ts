@@ -78,6 +78,7 @@ import {
 import {
   BookingActionPendingError,
   BalanceAlreadySettledError,
+  BookingDeployInFlightError,
   BookingEscrowStateError,
   BookingHoldExpiredError,
   BookingNotFoundError,
@@ -820,6 +821,12 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       if (error instanceof BookingHoldExpiredError) {
         return c.json({ code: "HOLD_EXPIRED", message: error.message }, 409);
+      }
+      // Issue #6: this booking's first deploy is already running on another
+      // request. Same booking, no second contract, plain words -- the client
+      // waits rather than clicking into a third attempt.
+      if (error instanceof BookingDeployInFlightError) {
+        return c.json({ code: "DEPLOY_IN_FLIGHT", message: error.message, details: { bookingId: error.bookingId } }, 409);
       }
       if (error instanceof BookingEscrowStateError) {
         return c.json({ code: "BOOKING_STATE", message: error.message }, 409);

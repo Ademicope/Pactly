@@ -50,7 +50,7 @@ import {
   type EscrowLifecycle,
   type EscrowLifecycleAction,
 } from "../escrow/trustless-work/reconciler.js";
-import type { EscrowAdapter, SubmitTransactionResult, UnsignedTransaction } from "../escrow/interface.js";
+import type { DeployEscrowResult, EscrowAdapter, SubmitTransactionResult, UnsignedTransaction } from "../escrow/interface.js";
 import {
   getBookingById,
   getBookingsByIds,
@@ -64,6 +64,8 @@ import {
   listPotentialDoubleSales,
   listConflictingSlotBookings,
   clearUnsubmittedEscrowContractId,
+  claimEscrowLock,
+  releaseEscrowLock,
   markBalancePaidCashIfUnpaid,
   markBalancePaidPlatform,
   recordDeploySubmission,
@@ -245,6 +247,20 @@ export class BookingHoldExpiredError extends Error {
   constructor(message = "This hold has expired. The slot may already be taken again.") {
     super(message);
     this.name = "BookingHoldExpiredError";
+  }
+}
+
+/** Issue #6: this booking's first setup is already running on another
+ * request, which holds its one in-flight claim, so no second one is built
+ * here. The client's own double click lands on this refusal rather than a
+ * second contract -- plain words, since the message reaches the screen. */
+export class BookingDeployInFlightError extends Error {
+  bookingId: string;
+
+  constructor(bookingId: string, message = "This booking is already being set up. Give it a moment.") {
+    super(message);
+    this.name = "BookingDeployInFlightError";
+    this.bookingId = bookingId;
   }
 }
 
@@ -582,13 +598,20 @@ export interface LockDepositDeps {
  * whether their own submit attempt actually failed, is a better judge of
  * "abandoned" than an inferred chain read ever was).
  *
- * **Concurrency.** Two concurrent `lockDeposit` calls building a *first*
- * deploy race on the same conditioned `updateEscrowContractId` write; the
- * loser's write is caught (never left to escape as a raw, untyped error)
- * and this simply re-reads the row and re-runs from the top, which then
- * returns whatever the winner actually persisted (a `{deployed: true}`, a
- * retryable stored XDR, or a typed {@link BookingEscrowStateError} if the
- * booking has moved on further still).
+ * **Concurrency (issue #6).** A first deploy is preceded by one conditioned
+ * SQL write that takes the booking's only in-flight claim
+ * (`db/bookings.ts`'s `claimEscrowLock`) -- so a second `lockDeposit` for
+ * the same booking never reaches the adapter at all. While that claimant is
+ * still mid-deploy this refuses (typed {@link BookingDeployInFlightError},
+ * naming the same booking id) rather than building a second escrow; once it
+ * has finished this re-runs from the top and returns whatever the winner
+ * actually persisted (a `{deployed: true}`, a retryable stored XDR, or a
+ * typed {@link BookingEscrowStateError} if the booking has moved on further
+ * still). A deploy that fails releases its claim immediately, so a retry is
+ * not locked out until the stale window passes, and two *different*
+ * bookings claim independently and still deploy at the same time. The older
+ * conditioned-write race inside {@link updateEscrowContractId} remains as
+ * the last line of defense for a rebuild that interleaves with a submit.
  */
 export async function lockDeposit(
   db: Db,
@@ -627,19 +650,47 @@ export async function lockDeposit(
 
   const providerAddress = await requireProviderAddress(db, booking);
 
-  const deployResult = await adapter.deploy({
-    bookingId: booking.id,
-    clientAddress: booking.clientWalletAddress,
-    providerAddress,
-    tokenAddress: booking.tokenAddress,
-    assetSymbol: DEPOSIT_ASSET_SYMBOL,
-    amount: booking.depositAmount,
-    title: `Pactly booking ${booking.id}`,
-    description: `Pactly session deposit for booking ${booking.id}`,
-  });
+  // Issue #6: take this booking's one in-flight first-deploy claim *before*
+  // the adapter call, in one conditioned SQL write (`db/bookings.ts`'s
+  // `claimEscrowLock`) -- the persisted `contractId` below could only ever
+  // settle which of two racing deploys *won*, never stop the second deploy
+  // from happening at all.
+  const claimToken = randomBytes(16).toString("hex");
+  const claimed = await claimEscrowLock(db, bookingId, claimToken, now);
+  if (!claimed) {
+    const current = await requireBooking(db, bookingId);
+    if (current.escrowContractId === null && current.escrowState === null) {
+      throw new BookingDeployInFlightError(bookingId);
+    }
+    // The claimant has already finished -- re-run from the top and return
+    // from the row's actual state (its persisted contractId, or the typed
+    // refusal if the booking has moved on further still).
+    return lockDeposit(db, bookingId, adapter, deps);
+  }
+
+  let deployResult: DeployEscrowResult;
+  try {
+    deployResult = await adapter.deploy({
+      bookingId: booking.id,
+      clientAddress: booking.clientWalletAddress,
+      providerAddress,
+      tokenAddress: booking.tokenAddress,
+      assetSymbol: DEPOSIT_ASSET_SYMBOL,
+      amount: booking.depositAmount,
+      title: `Pactly booking ${booking.id}`,
+      description: `Pactly session deposit for booking ${booking.id}`,
+    });
+  } catch (error) {
+    // Issue #6: a failed deploy that stored no contract id releases the
+    // claim on the way out, so an immediate retry is not locked out until
+    // the stale window passes.
+    await releaseEscrowLock(db, bookingId, claimToken);
+    throw error;
+  }
   try {
     await updateEscrowContractId(db, bookingId, deployResult.contractId, deployResult.unsignedXdr, deployResult.txHash);
   } catch (error) {
+    await releaseEscrowLock(db, bookingId, claimToken);
     if (error instanceof TypeError) {
       // Lost a race to a concurrent lockDeposit call that persisted first
       // -- never let that raw TypeError escape as an untyped 500. Re-read
@@ -654,6 +705,28 @@ export async function lockDeposit(
 
 export interface FundDepositDeps {
   now?: number;
+  /** Issue #5: asks the network whether one transaction hash has already
+   * settled successfully. Only ever consulted for a fund transaction this
+   * booking has already built (a stored `escrowFundTxHash`), i.e. on a
+   * rebuild -- never on a booking's first fund, and it never writes
+   * anything. Defaults to {@link transactionReachedSuccess}'s own real
+   * Soroban RPC read; a test injects a canned answer. */
+  transactionReachedSuccess?: (txHash: string) => Promise<boolean>;
+}
+
+/** Issue #5: the fund transaction Pactly already built for this booking has
+ * settled successfully on chain, so the deposit is in -- building another
+ * would put the client one signature away from paying twice. Refused rather
+ * than rebuilt; the reconciler's own chain evidence is what moves
+ * `escrow_state` and turns this into a confirmed funding (AD-1). */
+export class DepositAlreadyLandedError extends Error {
+  bookingId: string;
+
+  constructor(bookingId: string, message = "Your deposit has already reached the escrow. This will show in a moment.") {
+    super(message);
+    this.name = "DepositAlreadyLandedError";
+    this.bookingId = bookingId;
+  }
 }
 
 /**
