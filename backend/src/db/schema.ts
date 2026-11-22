@@ -632,3 +632,30 @@ export const shopReports = sqliteTable("shop_reports", {
   /** UTC epoch seconds. */
   createdAt: integer("created_at").notNull(),
 });
+
+/**
+ * Issue #7: every escrow contract id a deploy ever returned for a booking,
+ * including one a later retry replaced. `bookings.escrow_contract_id` can
+ * only ever hold the current one, so a deploy that was replaced left a real
+ * contract -- possibly holding money -- that nothing in the app still links
+ * to; this table is what makes those visible to the client and to support.
+ *
+ * Write-only alongside that persisted id (never a replacement for it): every
+ * settlement call still reads `bookings.escrow_contract_id`, so a replaced
+ * id can never be used to move money by accident. Duplicate (booking,
+ * contract) pairs -- a retried lock that re-persisted the same deploy -- are
+ * recorded once.
+ */
+export const escrowContractDeployments = sqliteTable(
+  "escrow_contract_deployments",
+  {
+    bookingId: text("booking_id").notNull(),
+    /** The Trustless Work escrow's own identity (a Soroban `C...`) exactly
+     * as `deploy` returned it. */
+    contractId: text("contract_id").notNull(),
+    /** UTC epoch seconds -- when this contract id was persisted for the
+     * booking, the same clock `bookings.deploy_submitted_at` uses. */
+    deployedAt: integer("deployed_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.bookingId, table.contractId] })],
+);

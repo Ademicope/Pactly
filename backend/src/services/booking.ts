@@ -89,6 +89,7 @@ import {
 } from "./availability.js";
 import { recordEscrowDisputeResolution } from "../db/escrowDisputeResolutions.js";
 import { getEscrowDisputeOpeningsForBookings, recordEscrowDisputeOpening } from "../db/escrowDisputeOpenings.js";
+import { listContractDeployments, recordContractDeployment } from "../db/escrowContractDeployments.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
 import { computeDepositAmount, NotAProviderError, ProviderNotFoundError } from "./profile.js";
 import { resolveUsdcAsset, type ResolveUsdcAssetOptions, type UsdcAsset } from "../anchor/usdc.js";
@@ -700,6 +701,12 @@ export async function lockDeposit(
     }
     throw error;
   }
+
+  // Issue #7: recorded beside the id itself, once it is actually persisted.
+  // A deploy that failed, or one that lost the race above and never stored
+  // anything, reaches neither line -- so a contract id only ever enters the
+  // history when the booking really had it.
+  await recordContractDeployment(db, { bookingId, contractId: deployResult.contractId, deployedAt: now });
 
   return { deployed: false, contractId: deployResult.contractId, unsignedXdr: deployResult.unsignedXdr, txHash: deployResult.txHash };
 }
@@ -1601,6 +1608,14 @@ export interface BookingView {
    * back from `escrowState` above (AD-1) -- a deploy Pactly relayed proves
    * the escrow was created, never that money moved into it. */
   deploySubmitted: boolean;
+  /** Issue #7: every contract id a deploy ever returned for this booking,
+   * oldest first, with the one the booking currently settles against marked
+   * -- so a contract a retry lost track of stays openable in the escrow
+   * viewer instead of vanishing. `[]` for a booking that has never deployed
+   * (and for a pre-#7 booking that deployed before any history was kept),
+   * which the panel renders as nothing at all. Read-only: no settlement
+   * call takes an id from here. */
+  contractHistory: { contractId: string; active: boolean }[];
   deposit: Money;
   balance: Money;
   price: Money;
@@ -1644,6 +1659,10 @@ export async function getBookingView(
     holdExpiresAt: booking.holdExpiresAt,
     contractId: booking.escrowContractId,
     deploySubmitted: booking.deploySubmittedAt !== null,
+    contractHistory: (await listContractDeployments(db, booking.id)).map((row) => ({
+      contractId: row.contractId,
+      active: row.contractId === booking.escrowContractId,
+    })),
     deposit: { amount: booking.depositAmount, asset: ASSET },
     balance: { amount: booking.balanceAmount, asset: ASSET },
     price: { amount: (BigInt(booking.depositAmount) + BigInt(booking.balanceAmount)).toString(), asset: ASSET },

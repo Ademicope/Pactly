@@ -148,6 +148,15 @@ const STATEMENTS: readonly string[] = [
     tx_hash TEXT NOT NULL,
     opened_at INTEGER NOT NULL
   )`,
+  // Issue #7: every contract id a deploy returned for a booking, including a
+  // replaced one (see `schema.ts`'s own table comment). Its composite primary
+  // key doubles as the lookup index for "every id this booking deployed".
+  `CREATE TABLE IF NOT EXISTS escrow_contract_deployments (
+    booking_id TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    deployed_at INTEGER NOT NULL,
+    PRIMARY KEY (booking_id, contract_id)
+  )`,
   // Passkey pivot: users with an embedded custodial account, their passkey
   // credentials, and the consume-once WebAuthn challenges.
   `CREATE TABLE IF NOT EXISTS users (

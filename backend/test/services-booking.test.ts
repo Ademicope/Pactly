@@ -17,8 +17,9 @@ import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 
-import { BookingDeployInFlightError, BookingEscrowStateError, DepositAlreadyLandedError, fundDeposit, lockDeposit, resolveBookingDispute, setBalanceState } from "../src/services/booking.js";
+import { BookingDeployInFlightError, BookingEscrowStateError, BookingNotFoundError, DepositAlreadyLandedError, fundDeposit, getBookingView, lockDeposit, resolveBookingDispute, setBalanceState } from "../src/services/booking.js";
 import { getEscrowDisputeResolution } from "../src/db/escrowDisputeResolutions.js";
+import { listContractDeployments } from "../src/db/escrowContractDeployments.js";
 import { getBookingById, recordDeploySubmission, setEscrowFundTxHash, updateEscrowContractId, updateEscrowStateSync } from "../src/db/bookings.js";
 import { bookings } from "../src/db/schema.js";
 import { insertEscrowProcessedEventIfNew } from "../src/db/escrowProcessedEvents.js";
@@ -604,6 +605,85 @@ test("Issue #5: a fund transaction that has not landed is rebuilt, a first fund 
       TransactionStatusUnavailableError,
     );
     assert.equal(fundCalls, 2, "an unreadable network must not build a third fund transaction");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Issue #7: every contract id a booking deployed is kept, the current one is the active one, and only it settles", async () => {
+  const result = openTestDatabase();
+  try {
+    const clientAddress = Keypair.random().publicKey();
+    const bookingId = await seedBooking(result, { clientWalletAddress: clientAddress });
+    const firstContractId = fakeContractId();
+    const secondContractId = fakeContractId();
+    let nextContractId = firstContractId;
+    const adapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      deploy: async () => ({ contractId: nextContractId, unsignedXdr: `unsigned-${nextContractId}`, txHash: `tx-${nextContractId}` }),
+      fund: async (input: FundEscrowInput) => ({ unsignedXdr: `fund-${input.contractId}`, txHash: "fund-tx-hash" }),
+    };
+
+    // Ten seconds pass between the two deploys -- the history is ordered by
+    // the clock it recorded, so the test pins that clock rather than a tie.
+    const firstDeployedAt = Math.floor(Date.now() / 1000);
+    await lockDeposit(result.db, bookingId, adapter, { now: firstDeployedAt });
+
+    // The deploy never got submitted, so the client asks for a fresh one --
+    // the old contract id must stay visible, not be silently replaced.
+    nextContractId = secondContractId;
+    await lockDeposit(result.db, bookingId, adapter, { now: firstDeployedAt + 10, rebuild: true });
+
+    const booking = await getBookingById(result.db, bookingId);
+    assert.equal(booking?.escrowContractId, secondContractId);
+
+    const history = await listContractDeployments(result.db, bookingId);
+    assert.deepEqual(
+      history.map((row) => row.contractId),
+      [firstContractId, secondContractId],
+      "both ids, oldest first",
+    );
+
+    // ...and a retried lock that re-persisted the same id records it once.
+    // (No submit is recorded yet, so this returns the stored XDR -- the
+    // point being only that the history does not grow.)
+    await lockDeposit(result.db, bookingId, unreachableEscrowAdapter());
+    assert.equal((await listContractDeployments(result.db, bookingId)).length, 2);
+
+    await recordDeploySubmission(result.db, bookingId, secondContractId, `tx-${secondContractId}`, Math.floor(Date.now() / 1000) + 600, Math.floor(Date.now() / 1000));
+
+    const funded = await fundDeposit(result.db, bookingId, adapter);
+    assert.equal(funded.unsignedXdr, `fund-${secondContractId}`, "settlement only ever targets the current contract id, never a superseded one");
+
+    const view = await getBookingView(result.db, bookingId, clientAddress);
+    assert.deepEqual(view.contractHistory, [
+      { contractId: firstContractId, active: false },
+      { contractId: secondContractId, active: true },
+    ]);
+
+    // Edge case: another client's booking ids are not readable at all.
+    await assert.rejects(() => getBookingView(result.db, bookingId, Keypair.random().publicKey()), BookingNotFoundError);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Issue #7: a deploy that fails or a booking that never deployed has nothing to show", async () => {
+  const result = openTestDatabase();
+  try {
+    const clientAddress = Keypair.random().publicKey();
+    const bookingId = await seedBooking(result, { clientWalletAddress: clientAddress });
+
+    assert.deepEqual((await getBookingView(result.db, bookingId, clientAddress)).contractHistory, []);
+
+    const failing: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      deploy: async () => {
+        throw new Error("Trustless Work refused");
+      },
+    };
+    await assert.rejects(() => lockDeposit(result.db, bookingId, failing));
+    assert.deepEqual(await listContractDeployments(result.db, bookingId), [], "a deploy that returned no id adds no row");
   } finally {
     closeDatabase(result);
   }
