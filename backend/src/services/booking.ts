@@ -51,6 +51,7 @@ import {
   type EscrowLifecycleAction,
 } from "../escrow/trustless-work/reconciler.js";
 import type { DeployEscrowResult, EscrowAdapter, SubmitTransactionResult, UnsignedTransaction } from "../escrow/interface.js";
+import { transactionReachedSuccess } from "../escrow/transaction-status.js";
 import {
   getBookingById,
   getBookingsByIds,
@@ -746,6 +747,19 @@ export class DepositAlreadyLandedError extends Error {
  * could only be stale or a replay). Refused (typed
  * {@link BookingHoldExpiredError}) once the hold has expired with
  * `escrowState` still `null`.
+ *
+ * **Issue #5: a fund that already landed is never asked for again.** Only a
+ * *rebuild* can be a duplicate -- a booking with no stored
+ * `escrowFundTxHash` has never had a fund transaction built, so nothing is
+ * read from the network for it, and `fundDeposit` goes straight to the
+ * adapter exactly as before. Once one has been built, its own hash is asked
+ * of the chain first: a SUCCESS settles it (typed
+ * {@link DepositAlreadyLandedError} -- the deposit is in, and signing a
+ * second fund XDR would put the client one tap away from paying twice),
+ * anything else (still flying, or failed) leaves the retry open. A network
+ * that cannot answer at all refuses too ({@link
+ * TransactionStatusUnavailableError}, retryable) rather than have a missing
+ * answer read as permission to build another.
  */
 export async function fundDeposit(
   db: Db,
@@ -764,6 +778,13 @@ export async function fundDeposit(
     throw new BookingEscrowStateError(`Booking "${bookingId}" already has escrow_state "${booking.escrowState}"; cannot fund again`);
   }
   requireHoldNotExpired(booking, now);
+
+  if (booking.escrowFundTxHash) {
+    const reachedSuccess = deps.transactionReachedSuccess ?? ((txHash: string) => transactionReachedSuccess(txHash));
+    if (await reachedSuccess(booking.escrowFundTxHash)) {
+      throw new DepositAlreadyLandedError(bookingId);
+    }
+  }
 
   const result = await adapter.fund({
     contractId: booking.escrowContractId,
@@ -1572,6 +1593,14 @@ export interface BookingView {
   pendingAction: EscrowActionKind | null;
   holdExpiresAt: number | null;
   contractId: string | null;
+  /** Issue #5: one of the two facts the status panel now shows separately --
+   * Pactly's own recorded evidence that a signed deploy for this booking
+   * was relayed (`deploySubmittedAt` is set by `recordDeploySubmission`,
+   * which only ever runs on a successful relay). Deliberately *not* the
+   * same thing as "funded": that stays the reconciler's own answer, read
+   * back from `escrowState` above (AD-1) -- a deploy Pactly relayed proves
+   * the escrow was created, never that money moved into it. */
+  deploySubmitted: boolean;
   deposit: Money;
   balance: Money;
   price: Money;
@@ -1614,6 +1643,7 @@ export async function getBookingView(
     pendingAction: derivePendingAction(booking, lifecycle.action),
     holdExpiresAt: booking.holdExpiresAt,
     contractId: booking.escrowContractId,
+    deploySubmitted: booking.deploySubmittedAt !== null,
     deposit: { amount: booking.depositAmount, asset: ASSET },
     balance: { amount: booking.balanceAmount, asset: ASSET },
     price: { amount: (BigInt(booking.depositAmount) + BigInt(booking.balanceAmount)).toString(), asset: ASSET },

@@ -17,12 +17,13 @@ import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 
-import { BookingDeployInFlightError, BookingEscrowStateError, fundDeposit, lockDeposit, resolveBookingDispute, setBalanceState } from "../src/services/booking.js";
+import { BookingDeployInFlightError, BookingEscrowStateError, DepositAlreadyLandedError, fundDeposit, lockDeposit, resolveBookingDispute, setBalanceState } from "../src/services/booking.js";
 import { getEscrowDisputeResolution } from "../src/db/escrowDisputeResolutions.js";
-import { getBookingById, recordDeploySubmission, updateEscrowContractId, updateEscrowStateSync } from "../src/db/bookings.js";
+import { getBookingById, recordDeploySubmission, setEscrowFundTxHash, updateEscrowContractId, updateEscrowStateSync } from "../src/db/bookings.js";
 import { bookings } from "../src/db/schema.js";
 import { insertEscrowProcessedEventIfNew } from "../src/db/escrowProcessedEvents.js";
 import type { Db } from "../src/db/client.js";
+import { TransactionStatusUnavailableError } from "../src/escrow/transaction-status.js";
 import type {
   DeployEscrowInput,
   DeployEscrowResult,
@@ -481,6 +482,128 @@ test("fundDeposit refuses once the hold has expired with escrow_state still null
       () => fundDeposit(result.db, bookingId, unreachableEscrowAdapter(), { now: past + 1 }),
       (error: unknown) => error instanceof Error && error.name === "BookingHoldExpiredError",
     );
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Issue #5: resuming a deployed-but-unfunded booking rebuilds only the fund, and never a second deploy", async () => {
+  const result = openTestDatabase();
+  try {
+    const depositAmount = "5000000";
+    const bookingId = await seedBooking(result, { depositAmount });
+    const contractId = fakeContractId();
+    const deployResult: DeployEscrowResult = { contractId, unsignedXdr: "unsigned-xdr", txHash: "deploy-tx-hash" };
+    let deployCalls = 0;
+    const adapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      deploy: async () => {
+        deployCalls += 1;
+        return deployResult;
+      },
+    };
+
+    await lockDeposit(result.db, bookingId, adapter);
+    await recordDeploySubmission(result.db, bookingId, contractId, "deploy-tx-hash", Math.floor(Date.now() / 1000) + 600, Math.floor(Date.now() / 1000));
+
+    // The fund signature failed (or the tab was closed) after the deploy
+    // landed. Resume: `lockDeposit` must hand back the stored contract with
+    // no adapter call at all, so the flow can go straight to funding.
+    const resumed = await lockDeposit(result.db, bookingId, unreachableEscrowAdapter());
+    assert.deepEqual(resumed, { deployed: true, contractId });
+    assert.equal(deployCalls, 1, "resuming a deployed booking must never deploy a second contract");
+
+    // ...and the fund step then targets exactly that same contract id.
+    let capturedFund: FundEscrowInput | undefined;
+    const fundAdapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      fund: async (input: FundEscrowInput) => {
+        capturedFund = input;
+        return { unsignedXdr: "fund-unsigned-xdr", txHash: "fund-tx-hash" };
+      },
+    };
+    await fundDeposit(result.db, bookingId, fundAdapter);
+    assert.equal(capturedFund?.contractId, contractId);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Issue #5: a fund transaction the network already reports successful is never asked for again", async () => {
+  const result = openTestDatabase();
+  try {
+    const bookingId = await seedBooking(result);
+    const contractId = fakeContractId();
+    await updateEscrowContractId(result.db, bookingId, contractId, "unsigned-xdr", "deploy-tx-hash");
+    await recordDeploySubmission(result.db, bookingId, contractId, "deploy-tx-hash", Math.floor(Date.now() / 1000) + 600, Math.floor(Date.now() / 1000));
+    await setEscrowFundTxHash(result.db, bookingId, "first-fund-tx-hash");
+
+    const adapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      fund: async () => {
+        throw new Error("a fund transaction that already landed must not be built again");
+      },
+    };
+
+    await assert.rejects(
+      () => fundDeposit(result.db, bookingId, adapter, { transactionReachedSuccess: async () => true }),
+      (error: unknown) => error instanceof DepositAlreadyLandedError && error.bookingId === bookingId,
+    );
+
+    const booking = await getBookingById(result.db, bookingId);
+    assert.equal(booking?.escrowFundTxHash, "first-fund-tx-hash", "the refusal must leave the landed transaction stored");
+    assert.equal(booking?.escrowState, null, "only the reconciler's own chain evidence sets escrow_state (AD-1)");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Issue #5: a fund transaction that has not landed is rebuilt, a first fund reads nothing, and an unreadable network refuses", async () => {
+  const result = openTestDatabase();
+  try {
+    const bookingId = await seedBooking(result);
+    const contractId = fakeContractId();
+    await updateEscrowContractId(result.db, bookingId, contractId, "unsigned-xdr", "deploy-tx-hash");
+    await recordDeploySubmission(result.db, bookingId, contractId, "deploy-tx-hash", Math.floor(Date.now() / 1000) + 600, Math.floor(Date.now() / 1000));
+
+    // Edge case "a booking with no fund transaction built yet": nothing is
+    // read from the network -- the status seam is never even called.
+    let statusCalls = 0;
+    let fundCalls = 0;
+    const adapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      fund: async () => {
+        fundCalls += 1;
+        return { unsignedXdr: `fund-unsigned-xdr-${fundCalls}`, txHash: `fund-tx-hash-${fundCalls}` };
+      },
+    };
+    const first = await fundDeposit(result.db, bookingId, adapter, {
+      transactionReachedSuccess: async () => {
+        statusCalls += 1;
+        return false;
+      },
+    });
+    assert.equal(statusCalls, 0, "the network is only asked about a transaction that has already been built");
+    assert.equal(first.unsignedXdr, "fund-unsigned-xdr-1");
+
+    // Still flying (or failed): the retry stays open, and a fresh
+    // transaction is built for the same contract.
+    const second = await fundDeposit(result.db, bookingId, adapter, { transactionReachedSuccess: async () => false });
+    assert.equal(second.unsignedXdr, "fund-unsigned-xdr-2");
+    assert.equal(fundCalls, 2);
+
+    // A network that cannot answer refuses rather than reading a missing
+    // answer as permission to build another.
+    await assert.rejects(
+      () =>
+        fundDeposit(result.db, bookingId, adapter, {
+          transactionReachedSuccess: async () => {
+            throw new TransactionStatusUnavailableError();
+          },
+        }),
+      TransactionStatusUnavailableError,
+    );
+    assert.equal(fundCalls, 2, "an unreadable network must not build a third fund transaction");
   } finally {
     closeDatabase(result);
   }

@@ -82,6 +82,7 @@ import {
   BookingEscrowStateError,
   BookingHoldExpiredError,
   BookingNotFoundError,
+  DepositAlreadyLandedError,
   InvalidDisputeReasonError,
   NothingToPayError,
   SlotTakenError,
@@ -110,6 +111,7 @@ import {
 } from "./services/booking.js";
 import { EscrowApiError, EscrowConfigError, EscrowRequestError } from "./escrow/trustless-work/errors.js";
 import { defaultEscrowAdapter } from "./escrow/trustless-work/client.js";
+import { TransactionStatusUnavailableError } from "./escrow/transaction-status.js";
 import type { EscrowAdapter } from "./escrow/interface.js";
 import { PaymentFailedError, PaymentUnavailableError } from "./payments/errors.js";
 import type { SubmitPaymentDeps } from "./payments/stellar.js";
@@ -857,6 +859,20 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       if (error instanceof BookingEscrowStateError) {
         return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
+      }
+      // Issue #5: the fund transaction Pactly already built for this booking
+      // has settled on chain -- the deposit is in, so a second one is never
+      // built. Nothing here says "funded" (AD-1): the reconciler's own chain
+      // evidence still has to land before the booking's poll shows `locked`.
+      if (error instanceof DepositAlreadyLandedError) {
+        return c.json({ code: "DEPOSIT_LANDED", message: error.message, details: { bookingId: error.bookingId } }, 409);
+      }
+      // Issue #5: the network could not be asked whether that transaction
+      // landed. Nothing has moved and the deposit is untouched, so this is
+      // retryable -- and it is deliberately not read as permission to
+      // re-fund, the same rule the status read itself follows.
+      if (error instanceof TransactionStatusUnavailableError) {
+        return c.json({ code: "DEPOSIT_STATUS_UNAVAILABLE", message: error.message }, 503);
       }
       if (error instanceof EscrowApiError || error instanceof EscrowRequestError || error instanceof EscrowConfigError) {
         const response = escrowErrorResponse(error);
