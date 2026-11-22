@@ -327,6 +327,10 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   if (!profile || !profile.isApproved) {
     throw new ProviderNotFoundError();
   }
+  // Story #18: a provider cannot book its own slot
+  if (profile.walletAddress === input.clientWalletAddress) {
+    throw new SlotTakenError();
+  }
   const slot = await getSlotByProviderAndStart(db, profile.id, input.slotStartsAt);
   if (!slot || slot.startsAt <= now) {
     throw new SlotUnavailableError();
