@@ -13,6 +13,17 @@ import { categories, type BalanceState } from "../src/db/schema.js";
 import { insertProviderProfile } from "../src/db/providerProfiles.js";
 import { insertBooking } from "../src/db/bookings.js";
 import type { ChainEvent, EventName } from "../src/chain/events.js";
+import type { UsdcTrustlineDeps } from "../src/anchor/trustline.js";
+import type { UsdcAsset } from "../src/anchor/usdc.js";
+
+/** Issue #4: a stand-in for the anchor's own USDC, same shape
+ * `app-booking-balance.test.ts`'s `FAKE_USDC` uses -- the issuer is a real
+ * account id so an issuer comparison has something to compare. */
+export const FAKE_USDC: UsdcAsset = {
+  code: "USDC",
+  issuer: "GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H",
+  contractId: "CUSDCFAKE00000000000000000000000000000000000000000",
+};
 
 /** A real, migrated, throwaway SQLite database -- `openDatabase(":memory:")`
  * per the story's own test convention. */
@@ -130,6 +141,31 @@ export async function seedBooking(result: OpenDatabaseResult, options: SeedBooki
   });
   return bookingId;
 }
+
+/** Issue #4: the wallet-readiness answers the new trustline gate needs,
+ * injected exactly the way `FAKE_USDC_DEPS` injects USDC discovery in
+ * `app-booking-balance.test.ts` -- so a test that was already exercising
+ * the deploy (or the approval) still reaches it, and a test that is
+ * specifically about readiness passes the other one. Neither ever opens a
+ * socket. */
+export const USDC_READY_WALLET_DEPS: UsdcTrustlineDeps = {
+  resolveUsdcAsset: async () => FAKE_USDC,
+  hasTrustline: async () => true,
+};
+
+export const USDC_MISSING_WALLET_DEPS: UsdcTrustlineDeps = {
+  resolveUsdcAsset: async () => FAKE_USDC,
+  hasTrustline: async () => false,
+};
+
+/** Issue #4 edge case: "a missing Horizon answer is a retryable error, not
+ * an approval" -- the same upstream failure every other network seam in
+ * this backend is tested with. */
+export const USDC_CHECK_UNAVAILABLE_WALLET_DEPS: UsdcTrustlineDeps = {
+  resolveUsdcAsset: async () => {
+    throw new Error("Could not reach tr-mock-anchor.fly.dev");
+  },
+};
 
 export function fakeChainEvent(event: {
   bookingId: string;

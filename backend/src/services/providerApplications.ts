@@ -31,6 +31,7 @@ import {
   updateProviderProfileFromApplication,
 } from "../db/providerProfiles.js";
 import type { ProviderApplicationState } from "../db/schema.js";
+import { requireUsdcTrustline, type UsdcTrustlineDeps } from "../anchor/trustline.js";
 import { computeDepositAmount, validateProviderRules } from "./profile.js";
 
 const ASSET = "USDC";
@@ -317,15 +318,30 @@ export async function listPendingApplications(db: Db): Promise<AdminProviderAppl
 
 export type ProviderApplicationOutcome = "approve" | "reject";
 
+export interface DecideApplicationDeps {
+  /** Issue #4: the seams {@link requireUsdcTrustline} asks the network
+   * through -- defaults to the real anchor and Horizon reads, same shape as
+   * `services/booking.ts`'s own `LockDepositDeps.usdcTrustline`. */
+  usdcTrustline?: UsdcTrustlineDeps;
+}
+
 /** `POST /admin/applications/:id/decide`. Approving puts the applicant's
  * profile on the marketplace immediately (Story 4.2 AC3); rejecting needs
- * a reason (AC2) and leaves the profile unapproved. */
+ * a reason (AC2) and leaves the profile unapproved.
+ *
+ * Issue #4: approving first asks the chain whether the applicant's own
+ * wallet can hold USDC at all. A shop that cannot would take a release it
+ * has nowhere to put, so nothing is written -- neither the profile's
+ * `is_approved` bit nor the decision row -- unless that read answers yes.
+ * A Horizon that cannot answer refuses the same way, retryably (an
+ * approval must never ride on a missing answer). */
 export async function decideApplication(
   db: Db,
   id: string,
   outcome: ProviderApplicationOutcome,
   adminWallet: string,
   reason?: string,
+  deps: DecideApplicationDeps = {},
 ): Promise<AdminProviderApplicationView> {
   const row = await getProviderApplicationById(db, id);
   if (!row) {
@@ -347,6 +363,10 @@ export async function decideApplication(
       // listing that cannot exist.
       throw new ProviderApplicationNotFoundError();
     }
+    // Issue #4: asked before *either* write below, so a wallet that cannot
+    // hold the deposit leaves the application exactly as pending as it
+    // found it -- and the admin's own screen says what is missing.
+    await requireUsdcTrustline(profile.walletAddress, deps.usdcTrustline);
     await setProviderProfileApproved(db, profile.id, true);
   }
 

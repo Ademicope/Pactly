@@ -123,3 +123,18 @@ export class AnchorAuthRequiredError extends Error {
     this.name = "AnchorAuthRequiredError";
   }
 }
+
+/** Issue #4: this wallet holds no trustline for the anchor's USDC, so a
+ * deposit could never land in it -- or leave it again. Refused *before*
+ * anything moves: approving the shop, or deploying the escrow. Maps to
+ * `409 WALLET_CANNOT_HOLD_DEPOSIT`, whose sentence is what reaches the
+ * screen, so it names nothing about how the wallet holds an asset.
+ * `walletAddress` is carried for the logs and support, never rendered. */
+export class UsdcTrustlineMissingError extends Error {
+  readonly walletAddress: string;
+  constructor(walletAddress: string, message = "This wallet can't hold the deposit asset yet.") {
+    super(message);
+    this.name = "UsdcTrustlineMissingError";
+    this.walletAddress = walletAddress;
+  }
+}

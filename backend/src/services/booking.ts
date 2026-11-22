@@ -92,6 +92,7 @@ import { getEscrowDisputeOpeningsForBookings, recordEscrowDisputeOpening } from 
 import { listContractDeployments, recordContractDeployment } from "../db/escrowContractDeployments.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
 import { computeDepositAmount, NotAProviderError, ProviderNotFoundError } from "./profile.js";
+import { requireUsdcTrustline, type UsdcTrustlineDeps } from "../anchor/trustline.js";
 import { resolveUsdcAsset, type ResolveUsdcAssetOptions, type UsdcAsset } from "../anchor/usdc.js";
 import {
   buildBalancePaymentTransaction,
@@ -559,6 +560,12 @@ export interface LockDepositDeps {
    * transaction rather than retrying the old one. Ignored (never rebuilds)
    * once a deploy has actually been submitted for this booking. */
   rebuild?: boolean;
+  /** Issue #4: the seams {@link requireUsdcTrustline} asks the network
+   * through (anchor USDC discovery, Horizon's account load). Defaults to the
+   * real reads, exactly as `buildBalancePaymentTransaction`'s own
+   * `resolveUsdcAsset` seam does; a test injects answers and never opens a
+   * socket. */
+  usdcTrustline?: UsdcTrustlineDeps;
 }
 
 /**
@@ -614,6 +621,14 @@ export interface LockDepositDeps {
  * bookings claim independently and still deploy at the same time. The older
  * conditioned-write race inside {@link updateEscrowContractId} remains as
  * the last line of defense for a rebuild that interleaves with a submit.
+ *
+ * **Issue #4: a wallet that cannot hold the deposit is never offered an
+ * escrow.** On the path that actually builds one -- not a retry returning a
+ * stored XDR -- the client's own wallet is asked, of the chain, whether it
+ * can hold the anchor's USDC at all
+ * (`anchor/trustline.ts`'s {@link requireUsdcTrustline}): deploying against
+ * a wallet that cannot leaves a contract no refund can ever reach. A
+ * network that cannot answer refuses too, rather than guess.
  */
 export async function lockDeposit(
   db: Db,
@@ -651,6 +666,13 @@ export async function lockDeposit(
   }
 
   const providerAddress = await requireProviderAddress(db, booking);
+
+  // Issue #4: a deposit this deploy locks can only come back out of -- or
+  // ever into -- a wallet that can hold the asset at all, so a wallet that
+  // cannot would trap the money in its own escrow. Asked before the claim
+  // and before the adapter call, so a refusal costs no contract and leaves
+  // nothing in flight.
+  await requireUsdcTrustline(booking.clientWalletAddress, deps.usdcTrustline);
 
   // Issue #6: take this booking's one in-flight first-deploy claim *before*
   // the adapter call, in one conditioned SQL write (`db/bookings.ts`'s

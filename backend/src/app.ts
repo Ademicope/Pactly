@@ -128,9 +128,11 @@ import {
   AnchorQuoteUnavailableError,
   AnchorQuoteUnsupportedError,
   AnchorUnavailableError,
+  UsdcTrustlineMissingError,
 } from "./anchor/errors.js";
 import { fetchIndicativePrice, type Sep38FetchLike } from "./anchor/sep38.js";
 import type { AnchorFetchLike } from "./anchor/http.js";
+import type { UsdcTrustlineDeps } from "./anchor/trustline.js";
 import {
   SandboxOnlyError,
   beginBookingAnchorAuth,
@@ -296,6 +298,12 @@ export interface CreateAppOptions {
   /** Passkey pivot: overrides `GET /rate`'s anchor `fetch` seam --
    * defaults to `quoteFetchImpl`, since it is the same SEP-38 call. */
   rateFetchImpl?: Sep38FetchLike;
+  /** Issue #4: overrides the network seams behind "can this wallet hold
+   * USDC at all?" (Horizon account load, USDC discovery, trustline read)
+   * -- the same inject-the-network discipline as `localDepositDeps` above,
+   * so a test exercising the lock and provider-approval routes never
+   * reaches a real Horizon endpoint. */
+  usdcTrustlineDeps?: UsdcTrustlineDeps;
 }
 
 export function createApp(db: Db, options: CreateAppOptions = {}): App {
@@ -311,6 +319,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     ...options.localDepositDeps,
     fetchImpl: options.localDepositDeps?.fetchImpl ?? (quoteFetchImpl as AnchorFetchLike | undefined),
   };
+  const usdcTrustlineDeps = options.usdcTrustlineDeps ?? {};
 
   // Every route above handles its own typed failures and returns the
   // `{code, message}` envelope itself; this is only the backstop for a
@@ -764,6 +773,29 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     return { code: "ESCROW_UNAVAILABLE", message: "Trustless Work is unavailable right now. Your deposit is untouched.", status: 503 as const };
   }
 
+  /** Issue #4: "this wallet can't hold the deposit yet" translated into the
+   * route's own envelope -- shared by the two routes that gate on it (the
+   * client's lock, the admin's approval). The caller supplies its own plain
+   * sentence, since the two audiences need different ones. Neither ever
+   * names the mechanism behind the check (Edge cases: "the sentence on
+   * screen does not say trustline, SEP, or issuer"). */
+  function walletReadinessErrorResponse(
+    error: UsdcTrustlineMissingError | PaymentUnavailableError,
+    missingMessage: string,
+  ) {
+    if (error instanceof UsdcTrustlineMissingError) {
+      return { code: "WALLET_CANNOT_HOLD_DEPOSIT", message: missingMessage, status: 409 as const };
+    }
+    // Edge cases: "a missing Horizon answer is a retryable error, not an
+    // approval" -- and, same rule as every other network read here, never
+    // a raw upstream message on screen.
+    return {
+      code: "WALLET_CHECK_UNAVAILABLE",
+      message: "We could not check whether this wallet is ready to hold the deposit. Try again in a moment.",
+      status: 503 as const,
+    };
+  }
+
   app.post("/bookings/hold", requirePactlyAuth, async (c) => {
     const body = await c.req.json().catch(() => undefined);
     const providerId = typeof body?.providerId === "string" ? body.providerId : undefined;
@@ -815,7 +847,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       await getBookingForClient(db, bookingId, c.get("walletAddress"));
       const body = await c.req.json().catch(() => undefined);
       const rebuild = body?.rebuild === true;
-      const result = await lockDeposit(db, bookingId, escrowAdapter, { rebuild });
+      const result = await lockDeposit(db, bookingId, escrowAdapter, { rebuild, usdcTrustline: usdcTrustlineDeps });
       return c.json(result);
     } catch (error) {
       if (error instanceof BookingNotFoundError) {
@@ -823,6 +855,16 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       if (error instanceof BookingHoldExpiredError) {
         return c.json({ code: "HOLD_EXPIRED", message: error.message }, 409);
+      }
+      // Issue #4: the client's own wallet cannot hold the deposit asset, so
+      // no contract was deployed and no money was promised -- say what is
+      // missing, in plain words.
+      if (error instanceof UsdcTrustlineMissingError || error instanceof PaymentUnavailableError) {
+        const response = walletReadinessErrorResponse(
+          error,
+          "Your wallet isn't ready to hold the deposit yet. Add the deposit asset to your wallet, then try again.",
+        );
+        return c.json({ code: response.code, message: response.message }, response.status);
       }
       // Issue #6: this booking's first deploy is already running on another
       // request. Same booking, no second contract, plain words -- the client
@@ -1373,11 +1415,22 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         outcome,
         c.get("walletAddress"),
         typeof body?.reason === "string" ? body.reason : undefined,
+        { usdcTrustline: usdcTrustlineDeps },
       );
       return c.json({ application });
     } catch (error) {
       if (error instanceof ProviderApplicationNotFoundError) {
         return c.json({ code: "APPLICATION_NOT_FOUND", message: error.message }, 404);
+      }
+      // Issue #4: the shop's wallet could not hold a deposit, so nothing was
+      // approved -- the application is still pending, and the admin is told
+      // what to ask for, in plain words.
+      if (error instanceof UsdcTrustlineMissingError || error instanceof PaymentUnavailableError) {
+        const response = walletReadinessErrorResponse(
+          error,
+          "This shop's wallet isn't ready to receive deposits yet. Ask them to get it ready, then approve again.",
+        );
+        return c.json({ code: response.code, message: response.message }, response.status);
       }
       if (error instanceof ProviderApplicationDecidedError) {
         return c.json({ code: "APPLICATION_DECIDED", message: error.message }, 409);

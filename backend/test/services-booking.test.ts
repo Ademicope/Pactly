@@ -33,11 +33,18 @@ import type {
   ResolveDisputeInput,
   UnsignedTransaction,
 } from "../src/escrow/interface.js";
-import { closeDatabase, openTestDatabase, randomBookingId, seedBooking, seedProviderProfile } from "./helpers.js";
+import { closeDatabase, openTestDatabase, randomBookingId, seedBooking, seedProviderProfile, USDC_READY_WALLET_DEPS } from "./helpers.js";
 
 function fakeContractId(): string {
   return StrKey.encodeContract(randomBytes(32));
 }
+
+/** Issue #4: `lockDeposit` now asks "can this wallet hold the deposit?"
+ * before it builds a deploy. Every test below is about the deploy, so it
+ * injects the "yes" answer -- the tests about the gate itself live in
+ * `anchor-trustline.test.ts`, plus the two route tests that assert the
+ * refusal. */
+const LOCK_DEPS = { usdcTrustline: USDC_READY_WALLET_DEPS };
 
 /** Seeds the reconciler's own record of a "disputed" transition for
  * `contractId` -- `resolveBookingDispute` now refuses to build a
@@ -115,7 +122,7 @@ test("lockDeposit calls the EscrowAdapter's deploy with the professional's walle
       },
     };
 
-    const lockResult = await lockDeposit(result.db, bookingId, adapter);
+    const lockResult = await lockDeposit(result.db, bookingId, adapter, LOCK_DEPS);
 
     assert.equal(lockResult.contractId, deployResult.contractId);
     assert.equal(lockResult.deployed, false);
@@ -163,7 +170,7 @@ test("lockDeposit retried within the hold returns the same stored deploy XDR and
       },
     };
 
-    const first = await lockDeposit(result.db, bookingId, adapter);
+    const first = await lockDeposit(result.db, bookingId, adapter, LOCK_DEPS);
     assert.equal(calls, 1);
     assert.equal(first.contractId, firstContractId);
     assert.equal(first.deployed, false);
@@ -233,7 +240,7 @@ test("lockDeposit with rebuild: true clears an unsubmitted deploy and builds a f
       },
     };
 
-    const rebuilt = await lockDeposit(result.db, bookingId, adapter, { rebuild: true });
+    const rebuilt = await lockDeposit(result.db, bookingId, adapter, { ...LOCK_DEPS, rebuild: true });
     assert.equal(calls, 1);
     assert.equal(rebuilt.contractId, freshContractId);
     assert.equal(rebuilt.deployed, false);
@@ -275,8 +282,8 @@ test("lockDeposit: two concurrent first-deploy calls deploy exactly once -- the 
     };
 
     const [first, second] = await Promise.allSettled([
-      lockDeposit(result.db, bookingId, adapter),
-      lockDeposit(result.db, bookingId, adapter),
+      lockDeposit(result.db, bookingId, adapter, LOCK_DEPS),
+      lockDeposit(result.db, bookingId, adapter, LOCK_DEPS),
     ]);
     // Issue #6: the claim is taken *before* the adapter call, so the second
     // request never reaches it -- exactly one escrow is built for this
@@ -313,14 +320,14 @@ test("lockDeposit: once the claimant has persisted its deploy, a later call retu
         deployCalls += 1;
         // Asked for the same booking while this deploy is still in flight.
         await assert.rejects(
-          () => lockDeposit(result.db, bookingId, adapter),
+          () => lockDeposit(result.db, bookingId, adapter, LOCK_DEPS),
           (error: unknown) => error instanceof BookingDeployInFlightError,
         );
         return { contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" };
       },
     };
 
-    const first = await lockDeposit(result.db, bookingId, adapter);
+    const first = await lockDeposit(result.db, bookingId, adapter, LOCK_DEPS);
     assert.deepEqual(first, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
 
     const retry = await lockDeposit(result.db, bookingId, unreachableEscrowAdapter());
@@ -347,8 +354,8 @@ test("lockDeposit: a failed deploy releases its claim so the client can retry im
       },
     };
 
-    await assert.rejects(() => lockDeposit(result.db, bookingId, failingThenWorkingAdapter));
-    const retried = await lockDeposit(result.db, bookingId, failingThenWorkingAdapter);
+    await assert.rejects(() => lockDeposit(result.db, bookingId, failingThenWorkingAdapter, LOCK_DEPS));
+    const retried = await lockDeposit(result.db, bookingId, failingThenWorkingAdapter, LOCK_DEPS);
     assert.deepEqual(retried, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
 
     // The claim is per booking, never global: a second booking's deploy is
@@ -359,7 +366,7 @@ test("lockDeposit: a failed deploy releases its claim so the client can retry im
       lockDeposit(result.db, otherBookingId, {
         ...unreachableEscrowAdapter(),
         deploy: async () => ({ contractId: otherContractId, unsignedXdr: "other-xdr", txHash: "other-tx-hash" }),
-      }),
+      }, LOCK_DEPS),
     ]);
     assert.deepEqual(storedAgain, { deployed: false, contractId, unsignedXdr: "unsigned-xdr", txHash: "tx-hash" });
     assert.deepEqual(other, { deployed: false, contractId: otherContractId, unsignedXdr: "other-xdr", txHash: "other-tx-hash" });
@@ -504,7 +511,7 @@ test("Issue #5: resuming a deployed-but-unfunded booking rebuilds only the fund,
       },
     };
 
-    await lockDeposit(result.db, bookingId, adapter);
+    await lockDeposit(result.db, bookingId, adapter, LOCK_DEPS);
     await recordDeploySubmission(result.db, bookingId, contractId, "deploy-tx-hash", Math.floor(Date.now() / 1000) + 600, Math.floor(Date.now() / 1000));
 
     // The fund signature failed (or the tab was closed) after the deploy
@@ -627,12 +634,12 @@ test("Issue #7: every contract id a booking deployed is kept, the current one is
     // Ten seconds pass between the two deploys -- the history is ordered by
     // the clock it recorded, so the test pins that clock rather than a tie.
     const firstDeployedAt = Math.floor(Date.now() / 1000);
-    await lockDeposit(result.db, bookingId, adapter, { now: firstDeployedAt });
+    await lockDeposit(result.db, bookingId, adapter, { ...LOCK_DEPS, now: firstDeployedAt });
 
     // The deploy never got submitted, so the client asks for a fresh one --
     // the old contract id must stay visible, not be silently replaced.
     nextContractId = secondContractId;
-    await lockDeposit(result.db, bookingId, adapter, { now: firstDeployedAt + 10, rebuild: true });
+    await lockDeposit(result.db, bookingId, adapter, { ...LOCK_DEPS, now: firstDeployedAt + 10, rebuild: true });
 
     const booking = await getBookingById(result.db, bookingId);
     assert.equal(booking?.escrowContractId, secondContractId);
@@ -682,7 +689,7 @@ test("Issue #7: a deploy that fails or a booking that never deployed has nothing
         throw new Error("Trustless Work refused");
       },
     };
-    await assert.rejects(() => lockDeposit(result.db, bookingId, failing));
+    await assert.rejects(() => lockDeposit(result.db, bookingId, failing, LOCK_DEPS));
     assert.deepEqual(await listContractDeployments(result.db, bookingId), [], "a deploy that returned no id adds no row");
   } finally {
     closeDatabase(result);

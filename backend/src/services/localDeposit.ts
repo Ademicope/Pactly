@@ -4,8 +4,6 @@
  * holds a key. Statuses are mapped to plain words here; SEP vocabulary
  * never leaves the route layer's JSON.
  */
-import { Horizon } from "@stellar/stellar-sdk";
-
 import { config } from "../config.js";
 import {
   AmountOutOfRangeError,
@@ -23,6 +21,7 @@ import {
 } from "../anchor/sep6-deposit.js";
 import { ensureSep12Approved } from "../anchor/sep12.js";
 import { fetchIndicativePrice } from "../anchor/sep38.js";
+import { accountHasUsdcTrustline } from "../anchor/trustline.js";
 import { resolveUsdcAsset } from "../anchor/usdc.js";
 import {
   extendHoldExpiresAt,
@@ -38,7 +37,6 @@ import {
   type BuildPaymentDeps,
   type SubmitPaymentDeps,
 } from "../payments/stellar.js";
-import { PaymentUnavailableError } from "../payments/errors.js";
 import {
   beginAnchorSep10,
   completeAnchorSep10,
@@ -121,12 +119,6 @@ function toTwoDecimalPlaces(decimal: string): string {
   return `${whole}.${fraction}`;
 }
 
-function defaultHorizonUrl(): string {
-  return config.stellarNetworkPassphrase.startsWith("Public Global Stellar Network")
-    ? "https://horizon.stellar.org"
-    : "https://horizon-testnet.stellar.org";
-}
-
 export interface LocalDepositDeps extends GetOrRefreshAnchorJwtDeps {
   fetchImpl?: AnchorFetchLike;
   now?: () => number;
@@ -141,24 +133,6 @@ function authDeps(deps: LocalDepositDeps): GetOrRefreshAnchorJwtDeps {
     tomlFetch: deps.tomlFetch ?? deps.fetchImpl,
     sep10Fetch: deps.sep10Fetch ?? deps.fetchImpl,
   };
-}
-
-async function defaultHasTrustline(account: string, assetCode: string, assetIssuer: string): Promise<boolean> {
-  try {
-    const horizon = new Horizon.Server(defaultHorizonUrl());
-    const loaded = await horizon.loadAccount(account);
-    return loaded.balances.some(
-      (balance) =>
-        "asset_code" in balance && balance.asset_code === assetCode && balance.asset_issuer === assetIssuer,
-    );
-  } catch (error) {
-    const name = error instanceof Error ? error.name : "";
-    const message = error instanceof Error ? error.message : String(error);
-    if (name === "NotFoundError" || /not found|404/i.test(message)) {
-      return false;
-    }
-    throw new PaymentUnavailableError(`Could not reach Horizon to check the USDC trustline: ${message}`);
-  }
 }
 
 function snapshotBankDetails(details: BankDetails): string {
@@ -320,7 +294,7 @@ export async function openLocalDeposit(
   await enforceLimits(booking.depositAmount, deps.fetchImpl);
 
   const usdc = await resolveUsdcAsset({ fetchImpl: deps.fetchImpl });
-  const hasTrustline = deps.hasTrustline ?? defaultHasTrustline;
+  const hasTrustline = deps.hasTrustline ?? accountHasUsdcTrustline;
   const ready = await hasTrustline(walletAddress, usdc.code, usdc.issuer);
   if (!ready) {
     const built = await buildChangeTrustTransaction(

@@ -23,7 +23,14 @@ import { getBookingById } from "../src/db/bookings.js";
 import { holdSlot, TooManyHoldsError } from "../src/services/booking.js";
 import { resetUsdcAssetCacheForTests, resolveUsdcAsset } from "../src/anchor/usdc.js";
 import type { EscrowAdapter } from "../src/escrow/interface.js";
-import { closeDatabase, openTestDatabase, seedProviderProfile } from "./helpers.js";
+import {
+  closeDatabase,
+  openTestDatabase,
+  seedProviderProfile,
+  USDC_CHECK_UNAVAILABLE_WALLET_DEPS,
+  USDC_MISSING_WALLET_DEPS,
+  USDC_READY_WALLET_DEPS,
+} from "./helpers.js";
 
 const FAKE_USDC_DEPS = { resolveUsdcAsset: async () => ({ contractId: "CUSDCFAKE00000000000000000000000000000000000000000" }) };
 
@@ -283,7 +290,7 @@ test("POST /bookings/:id/lock gives 503 ESCROW_UNAVAILABLE when the owner calls 
     const clientWalletAddress = "GOWNERWALLET4";
     const hold = await holdSlot(result.db, { providerProfileId, clientWalletAddress, slotStartsAt }, FAKE_USDC_DEPS);
 
-    const app = createApp(result.db);
+    const app = createApp(result.db, { usdcTrustlineDeps: USDC_READY_WALLET_DEPS });
     const headers = { ...(await authHeader(clientWalletAddress)), "content-type": "application/json" };
     const response = await app.request(`/bookings/${hold.bookingId}/lock`, { method: "POST", headers });
     assert.equal(response.status, 503);
@@ -468,12 +475,91 @@ test("POST /bookings/:id/lock gives 502 ESCROW_REJECTED when the injected adapte
         throw new EscrowApiError("ESCROW_PLATFORM_FEE_TOO_HIGH" as never, "platform fee too high");
       },
     });
-    const app = createApp(result.db, { escrowAdapter: adapter });
+    const app = createApp(result.db, { escrowAdapter: adapter, usdcTrustlineDeps: USDC_READY_WALLET_DEPS });
     const headers = { ...(await authHeader(clientWalletAddress)), "content-type": "application/json" };
     const response = await app.request(`/bookings/${hold.bookingId}/lock`, { method: "POST", headers });
     assert.equal(response.status, 502);
     const body = (await response.json()) as { code: string };
     assert.equal(body.code, "ESCROW_REJECTED");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+/** Issue #4 helper: a booking held by a client whose wallet the test then
+ * answers for -- the two route tests below only differ in that answer. */
+async function holdForWalletReadinessTest(result: ReturnType<typeof openTestDatabase>, clientWalletAddress: string) {
+  const providerProfileId = await seedProviderProfile(result, { isApproved: true });
+  const slotStartsAt = Math.floor(Date.now() / 1000) + 3600;
+  await replaceFutureSlots(result.db, providerProfileId, [slotStartsAt]);
+  return holdSlot(result.db, { providerProfileId, clientWalletAddress, slotStartsAt }, FAKE_USDC_DEPS);
+}
+
+test("POST /bookings/:id/lock gives 409 WALLET_CANNOT_HOLD_DEPOSIT, and deploys nothing, when the client's wallet cannot hold the deposit (issue #4)", async () => {
+  const result = openTestDatabase();
+  try {
+    const clientWalletAddress = "GOWNERWALLETNOTREADY0";
+    const hold = await holdForWalletReadinessTest(result, clientWalletAddress);
+
+    let deployCalls = 0;
+    const adapter = fakeEscrowAdapter({
+      deploy: async () => {
+        deployCalls += 1;
+        return { contractId: "contract-should-not-exist", unsignedXdr: "xdr", txHash: "hash" };
+      },
+    });
+    const app = createApp(result.db, { escrowAdapter: adapter, usdcTrustlineDeps: USDC_MISSING_WALLET_DEPS });
+    const headers = { ...(await authHeader(clientWalletAddress)), "content-type": "application/json" };
+
+    const response = await app.request(`/bookings/${hold.bookingId}/lock`, { method: "POST", headers });
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as { code: string; message: string };
+    assert.equal(body.code, "WALLET_CANNOT_HOLD_DEPOSIT");
+    assert.equal(deployCalls, 0, "a wallet that cannot hold the deposit is never offered an escrow");
+
+    const booking = await getBookingById(result.db, hold.bookingId);
+    assert.equal(booking?.escrowContractId, null, "no contract id is persisted by the refused lock");
+    assert.equal(booking?.escrowLockClaimToken, null, "and nothing is left claimed/in flight");
+
+    // Edge case: what reaches the screen names no mechanism.
+    assert.doesNotMatch(body.message, /trustline|issuer|SEP|XDR|Soroban/i, body.message);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("POST /bookings/:id/lock gives 503 WALLET_CHECK_UNAVAILABLE -- retryable, and still no deploy -- when the wallet check cannot be reached (issue #4)", async () => {
+  const result = openTestDatabase();
+  try {
+    const clientWalletAddress = "GOWNERWALLETCHECKDOWN0";
+    const hold = await holdForWalletReadinessTest(result, clientWalletAddress);
+
+    let deployCalls = 0;
+    const adapter = fakeEscrowAdapter({
+      deploy: async () => {
+        deployCalls += 1;
+        return { contractId: "contract-should-not-exist", unsignedXdr: "xdr", txHash: "hash" };
+      },
+    });
+    const app = createApp(result.db, { escrowAdapter: adapter, usdcTrustlineDeps: USDC_CHECK_UNAVAILABLE_WALLET_DEPS });
+    const headers = { ...(await authHeader(clientWalletAddress)), "content-type": "application/json" };
+
+    const response = await app.request(`/bookings/${hold.bookingId}/lock`, { method: "POST", headers });
+    assert.equal(response.status, 503);
+    const body = (await response.json()) as { code: string; message: string };
+    assert.equal(body.code, "WALLET_CHECK_UNAVAILABLE");
+    assert.equal(deployCalls, 0, "an unanswered question is never read as permission to deploy");
+    assert.doesNotMatch(body.message, /Horizon|trustline|issuer|ECONN|fetch failed/i, body.message);
+
+    // The same call, once the wallet is ready, does deploy -- the refusal
+    // left the booking exactly as it found it.
+    const readyApp = createApp(result.db, {
+      escrowAdapter: fakeEscrowAdapter({ deploy: async () => ({ contractId: "contract-after-retry", unsignedXdr: "xdr", txHash: "hash" }) }),
+      usdcTrustlineDeps: USDC_READY_WALLET_DEPS,
+    });
+    const retried = await readyApp.request(`/bookings/${hold.bookingId}/lock`, { method: "POST", headers });
+    assert.equal(retried.status, 200);
+    assert.equal(((await retried.json()) as { contractId: string }).contractId, "contract-after-retry");
   } finally {
     closeDatabase(result);
   }
@@ -495,7 +581,7 @@ test("POST /bookings/:id/lock with an injected adapter that accepts the deploy r
         return { contractId: `contract-${deployCalls}`, unsignedXdr: `xdr-${deployCalls}`, txHash: `hash-${deployCalls}` };
       },
     });
-    const app = createApp(result.db, { escrowAdapter: adapter });
+    const app = createApp(result.db, { escrowAdapter: adapter, usdcTrustlineDeps: USDC_READY_WALLET_DEPS });
     const headers = { ...(await authHeader(clientWalletAddress)), "content-type": "application/json" };
 
     const first = await app.request(`/bookings/${hold.bookingId}/lock`, { method: "POST", headers });
