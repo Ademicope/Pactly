@@ -429,3 +429,40 @@ export interface AdminApplicationsResponse {
 }
 
 export type ProviderApplicationOutcome = "approve" | "reject";
+
+/** Saved shops: a client's personal list of shops they want to book again. */
+
+export interface SaveShopResponse {
+  savedShopId: string;
+}
+
+export interface UnsaveShopResponse {
+  unsaved: boolean;
+}
+
+export interface IsShopSavedResponse {
+  isSaved: boolean;
+}
+
+export interface SavedShop {
+  id: string;
+  provider: {
+    id: string;
+    displayName: string;
+    title: string;
+    location: string;
+    categoryId: string;
+    sessionFormat: string;
+    sessionLengthMinutes: number;
+    priceAmount: string;
+    depositRateBps: number;
+    cancellationWindowHours: number;
+    isApproved: boolean;
+    verifiedSessionCount: number;
+  };
+  savedAt: number;
+}
+
+export interface SavedShopsResponse {
+  shops: SavedShop[];
+}

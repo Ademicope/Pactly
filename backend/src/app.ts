@@ -137,6 +137,14 @@ import {
   submitLocalDepositTrustline,
   type LocalDepositDeps,
 } from "./services/localDeposit.js";
+import {
+  ShopNotFoundError as SavedShopNotFoundError,
+  ShopNotApprovedError,
+  saveShop,
+  unsaveShop,
+  isShopSaved,
+  getSavedShopsForClient,
+} from "./services/savedShops.js";
 
 export interface Variables {
   /** Set by `requirePactlyAuth` once a request's Pactly JWT verifies --
@@ -1440,6 +1448,60 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       throw error;
     }
+  });
+
+  // ---------------------------------------------------------------------
+  // Saved shops: a client's personal list of shops they want to book again.
+  // ---------------------------------------------------------------------
+
+  /** A signed-in client saves an approved shop. Idempotent. */
+  app.post("/providers/:id/save", requirePactlyAuth, async (c) => {
+    const providerProfileId = c.req.param("id");
+    if (!providerProfileId) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const result = await saveShop(db, c.get("walletAddress"), providerProfileId, now);
+      return c.json(result, 201);
+    } catch (error) {
+      if (error instanceof SavedShopNotFoundError) {
+        return c.json({ code: "SHOP_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof ShopNotApprovedError) {
+        return c.json({ code: "SHOP_NOT_APPROVED", message: error.message }, 409);
+      }
+      throw error;
+    }
+  });
+
+  /** A signed-in client unsaves a shop. */
+  app.delete("/providers/:id/save", requirePactlyAuth, async (c) => {
+    const providerProfileId = c.req.param("id");
+    if (!providerProfileId) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+
+    const result = await unsaveShop(db, c.get("walletAddress"), providerProfileId);
+    return c.json(result);
+  });
+
+  /** Check if a shop is saved by the signed-in client. */
+  app.get("/providers/:id/saved", requirePactlyAuth, async (c) => {
+    const providerProfileId = c.req.param("id");
+    if (!providerProfileId) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+
+    const result = await isShopSaved(db, c.get("walletAddress"), providerProfileId);
+    return c.json(result);
+  });
+
+  /** List all saved shops for the signed-in client. */
+  app.get("/me/saved-shops", requirePactlyAuth, async (c) => {
+    const shops = await getSavedShopsForClient(db, c.get("walletAddress"));
+    return c.json({ shops });
   });
 
   return app;

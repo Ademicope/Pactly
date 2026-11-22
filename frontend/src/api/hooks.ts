@@ -2,7 +2,7 @@
  * for provider/category data. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiGet, apiPost, apiPut, ApiError } from "./client";
+import { apiGet, apiPost, apiPut, ApiError, apiDelete } from "./client";
 import type {
   ActionResponse,
   AdminDisputesResponse,
@@ -34,6 +34,10 @@ import type {
   ProviderApplicationInput,
   ProviderApplicationOutcome,
   RateResponse,
+  SaveShopResponse,
+  UnsaveShopResponse,
+  IsShopSavedResponse,
+  SavedShopsResponse,
 } from "./types";
 import { FALLBACK_TRY_PER_USDC } from "../lib/money";
 import type { Session } from "../wallet";
@@ -504,4 +508,38 @@ export function useTryRate(): TryRate {
     },
   });
   return query.data ?? FALLBACK_TRY_RATE;
+}
+
+// ---------------------------------------------------------------------------
+// Saved shops: a client's personal list of shops they want to book again.
+// ---------------------------------------------------------------------------
+
+/** Save a shop for the signed-in client. */
+export async function saveShop(providerProfileId: string, token: string): Promise<SaveShopResponse> {
+  return apiPost<SaveShopResponse>(`/providers/${providerProfileId}/save`, {}, token);
+}
+
+/** Unsave a shop for the signed-in client. */
+export async function unsaveShop(providerProfileId: string, token: string): Promise<UnsaveShopResponse> {
+  return apiDelete<UnsaveShopResponse>(`/providers/${providerProfileId}/save`, token);
+}
+
+/** Check if a shop is saved by the signed-in client. */
+export function useIsShopSaved(providerProfileId: string | undefined, session: Session | undefined) {
+  return useQuery({
+    queryKey: ["saved-shops", "check", providerProfileId, session?.walletAddress],
+    queryFn: () => apiGet<IsShopSavedResponse>(`/providers/${providerProfileId}/saved`, session?.token),
+    enabled: Boolean(providerProfileId && session),
+    retry: false,
+  });
+}
+
+/** List all saved shops for the signed-in client. */
+export function useSavedShops(session: Session | undefined) {
+  return useQuery({
+    queryKey: ["saved-shops", session?.walletAddress],
+    queryFn: () => apiGet<SavedShopsResponse>("/me/saved-shops", session?.token),
+    enabled: Boolean(session),
+    retry: false,
+  });
 }

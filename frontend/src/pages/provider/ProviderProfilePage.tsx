@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 
-import { usePublicProviderProfile } from "../../api/hooks";
+import { saveShop, unsaveShop, useIsShopSaved, usePublicProviderProfile } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import { DepositPill } from "../../components/DepositPill";
 import { ProviderHeader } from "../../components/ProviderHeader";
@@ -10,6 +10,7 @@ import { TryAmount } from "../../components/TryAmount";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSessionFormat } from "../../lib/sessionFormat";
 import { groupSlotsByDay } from "../../lib/time";
+import { getSession, type Session } from "../../wallet";
 
 /** `/providers/:id` -- a public profile, no sign-in required
  * (EXPERIENCE.md: "Discovery, search, profile viewing ... need no
@@ -19,6 +20,13 @@ export function ProviderProfilePage() {
   const { id } = useParams<{ id: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const { data: profile, isLoading, error } = usePublicProviderProfile(id);
+
+  const [session] = useState<Session | undefined>(() => getSession());
+  const { data: savedData, refetch: refetchSaved } = useIsShopSaved(id, session);
+  const [savingState, setSavingState] = useState<"idle" | "saving" | "unsaving">("idle");
+  const [saveNotice, setSaveNotice] = useState<string | undefined>();
+
+  const isSaved = savedData?.isSaved ?? false;
 
   // `?slot=<epochSeconds>` pre-selects that slot when it matches an open
   // one; any other value (unknown, stale, malformed) is silently ignored
@@ -36,6 +44,37 @@ export function ProviderProfilePage() {
     const next = new URLSearchParams(searchParams);
     next.set("slot", String(startsAt));
     setSearchParams(next, { replace: true });
+  }
+
+  async function handleSaveToggle(): Promise<void> {
+    if (!session || !id) return;
+
+    setSavingState(isSaved ? "unsaving" : "saving");
+    setSaveNotice(undefined);
+
+    try {
+      if (isSaved) {
+        await unsaveShop(id, session.token);
+        setSaveNotice("Removed from saved shops");
+      } else {
+        await saveShop(id, session.token);
+        setSaveNotice("Saved!");
+      }
+      await refetchSaved();
+      setTimeout(() => setSaveNotice(undefined), 2000);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.code === "SHOP_NOT_APPROVED") {
+          setSaveNotice("This shop is not taking bookings");
+        } else {
+          setSaveNotice("Something went wrong");
+        }
+      } else {
+        setSaveNotice("Connection dropped. Try again.");
+      }
+    } finally {
+      setSavingState("idle");
+    }
   }
 
   if (isLoading) {
@@ -65,6 +104,8 @@ export function ProviderProfilePage() {
   }
 
   const dayGroups = groupSlotsByDay(profile.slots);
+  
+  const canSave = session && profile.isApproved;
 
   return (
     <div className="page">
@@ -77,6 +118,23 @@ export function ProviderProfilePage() {
         verifiedSessionCount={profile.verifiedSessionCount}
         photoSrc={providerPhotoSrc(profile.id)}
       />
+
+      {canSave && (
+        <div style={{ marginTop: "var(--space-4)", display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={handleSaveToggle}
+            disabled={savingState !== "idle"}
+            style={{ fontSize: "var(--text-14)" }}
+          >
+            {savingState === "saving" && "Saving..."}
+            {savingState === "unsaving" && "Removing..."}
+            {savingState === "idle" && (isSaved ? "★ Saved" : "☆ Save shop")}
+          </button>
+          {saveNotice && <span style={{ fontSize: "var(--text-14)", color: "var(--color-text-secondary)" }}>{saveNotice}</span>}
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: "var(--space-6)" }}>
         <div className="price-row">
