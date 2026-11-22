@@ -24,7 +24,9 @@ import { LockButton } from "../../components/LockButton";
 import { ProviderHeader } from "../../components/ProviderHeader";
 import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
+import { WalletAddressConfirm } from "../../components/WalletAddressConfirm";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
+import { signingAddressMismatch } from "../../lib/walletConfirmation";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
 import { signInErrorMessage } from "../../components/SignInPanel";
 import { getSession, signIn, signOut, signXdr, type Session } from "../../wallet";
@@ -112,6 +114,11 @@ export function BookingPage() {
   const [localDeposit, setLocalDeposit] = useState<LocalDepositView | undefined>();
   const [localBusy, setLocalBusy] = useState(false);
   const [localNotice, setLocalNotice] = useState<string | undefined>();
+  const [lockWalletConfirm, setLockWalletConfirm] = useState<
+    | { kind: "flow"; address: string; rebuild: boolean }
+    | { kind: "retry"; address: string }
+    | undefined
+  >();
 
   // Review follow-up: the flow's own "engine" state (which contractId is in
   // play, whether a deploy has actually been submitted) lives in a ref, not
@@ -342,6 +349,27 @@ export function BookingPage() {
     setPhase(engineRef.current.deploySubmittedAtMs ? "deployed" : "idle");
   }
 
+  function confirmLockWallet(): void {
+    if (!lockWalletConfirm || !session) return;
+    const currentSession = getSession();
+    if (
+      signingAddressMismatch(lockWalletConfirm.address, session.walletAddress)
+      || signingAddressMismatch(lockWalletConfirm.address, currentSession?.walletAddress)
+    ) {
+      setLockWalletConfirm(undefined);
+      setFlowFatalError("The signing wallet changed. Refresh and try again.");
+      return;
+    }
+    if (lockWalletConfirm.kind === "retry") {
+      setLockWalletConfirm(undefined);
+      void retryPendingSignature();
+      return;
+    }
+    const rebuild = lockWalletConfirm.rebuild;
+    setLockWalletConfirm(undefined);
+    void runLockFlow({ rebuild });
+  }
+
   /** The main flow: lock (build or reuse a deploy) -> sign -> submit ->
    * fund -> sign -> submit -> reconcile. `rebuild` is only ever passed
    * explicitly, from the "Try again" action after a failed deploy submit. */
@@ -476,7 +504,7 @@ export function BookingPage() {
 
   function tryAgainAfterFailedDeploy(): void {
     engineRef.current = {};
-    void runLockFlow({ rebuild: true });
+    if (session) setLockWalletConfirm({ kind: "flow", address: session.walletAddress, rebuild: true });
   }
 
   async function ensureAnchorAuth(activeSession: Session, bookingId: string): Promise<boolean> {
@@ -631,6 +659,15 @@ export function BookingPage() {
 
   return (
     <div className="page booking-page">
+      {lockWalletConfirm && (
+        <WalletAddressConfirm
+          address={lockWalletConfirm.address}
+          confirmLabel={lockWalletConfirm.kind === "retry" ? "Confirm and continue signing" : "Confirm and lock"}
+          busy={busy}
+          onConfirm={confirmLockWallet}
+          onCancel={() => setLockWalletConfirm(undefined)}
+        />
+      )}
       <div className={`booking-lanes${isLocked ? " booking-lanes--sealed" : ""}`}>
         <section className="booking-lane booking-lane--client">
           <h2 className="booking-lane__heading">YOUR SIDE</h2>
@@ -753,8 +790,8 @@ export function BookingPage() {
                       <LockButton
                         waitingOn={waitingOn}
                         disabled={busy && !waitingOn}
-                        onClick={() => void runLockFlow()}
-                        onOpenWalletAgain={() => void retryPendingSignature()}
+                        onClick={() => session && setLockWalletConfirm({ kind: "flow", address: session.walletAddress, rebuild: false })}
+                        onOpenWalletAgain={() => session && setLockWalletConfirm({ kind: "retry", address: session.walletAddress })}
                       />
                     )}
                   </>
@@ -786,8 +823,8 @@ export function BookingPage() {
                 <LockButton
                   waitingOn={waitingOn}
                   disabled={busy && !waitingOn}
-                  onClick={() => void runLockFlow()}
-                  onOpenWalletAgain={() => void retryPendingSignature()}
+                  onClick={() => session && setLockWalletConfirm({ kind: "flow", address: session.walletAddress, rebuild: false })}
+                  onOpenWalletAgain={() => session && setLockWalletConfirm({ kind: "retry", address: session.walletAddress })}
                 />
               )}
               {phase === "reconciling-slow" && (

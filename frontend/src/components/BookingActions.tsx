@@ -13,7 +13,9 @@ import {
 } from "../api/hooks";
 import { isFreeCancelOpen } from "../lib/serverCancel";
 import { LOCAL_CURRENCY_UNAVAILABLE_NOTE } from "../lib/money";
-import { signXdr, type Session } from "../wallet";
+import { getSession, signXdr, type Session } from "../wallet";
+import { signingAddressMismatch } from "../lib/walletConfirmation";
+import { WalletAddressConfirm } from "./WalletAddressConfirm";
 import { useFormatTry } from "./TryAmount";
 import type {
   ActionResponse,
@@ -125,6 +127,13 @@ type DisputeStep =
  * "Confirm with your passkey…" would sit there, wrong, for all of it. */
 type BalanceActionKind = "pay-balance" | "confirming-balance" | "mark-cash";
 
+type WalletConfirm =
+  | { kind: "complete"; address: string }
+  | { kind: "approve"; address: string }
+  | { kind: "release"; address: string }
+  | { kind: "dispute"; address: string; reason: DisputeReason }
+  | { kind: "pay-balance"; address: string };
+
 /**
  * The role-correct action buttons for one booking (Story 3.6): "Mark
  * appointment complete" (provider, from `funded` only), "Approve" (client,
@@ -159,6 +168,7 @@ export function BookingActions({
   const [notice, setNotice] = useState<{ text: string; alert?: boolean } | undefined>(undefined);
   const [disputeStep, setDisputeStep] = useState<DisputeStep>({ kind: "idle" });
   const [confirmingCash, setConfirmingCash] = useState(false);
+  const [walletConfirm, setWalletConfirm] = useState<WalletConfirm | undefined>();
   const [syncedAtMs, setSyncedAtMs] = useState(() => Date.now());
   const [, setTick] = useState(0);
 
@@ -204,6 +214,38 @@ export function BookingActions({
     return "Connection dropped. Nothing changed.";
   }
 
+  function walletAddressIsCurrent(shownAddress: string): boolean {
+    return !signingAddressMismatch(shownAddress, session?.walletAddress)
+      && !signingAddressMismatch(shownAddress, getSession()?.walletAddress);
+  }
+
+  async function confirmWalletAction(): Promise<void> {
+    if (!walletConfirm || !session) return;
+    if (!walletAddressIsCurrent(walletConfirm.address)) {
+      setNotice({ text: "The signing wallet changed. Refresh and try again.", alert: true });
+      setWalletConfirm(undefined);
+      return;
+    }
+    switch (walletConfirm.kind) {
+      case "complete":
+        await runAction("complete", () => completeAppointment(id, session), "Marked complete. Waiting for it to confirm.");
+        break;
+      case "approve":
+        await runAction("approve", () => approveAppointment(id, session), "Approved. Waiting for it to confirm.");
+        break;
+      case "release":
+        await runAction("release", () => releaseDeposit(id, session), "Released. Waiting for it to confirm.");
+        break;
+      case "dispute":
+        await pickDisputeReason(walletConfirm.reason);
+        break;
+      case "pay-balance":
+        await handlePayBalance();
+        break;
+    }
+    setWalletConfirm(undefined);
+  }
+
   async function runAction(
     kind: ActionKind,
     build: () => Promise<ActionResponse | ReleaseDepositResponse>,
@@ -245,6 +287,11 @@ export function BookingActions({
 
   async function confirmDispute(): Promise<void> {
     if (disputeStep.kind !== "confirming" || !session) return;
+    if (signingAddressMismatch(session.walletAddress, getSession()?.walletAddress)) {
+      setNotice({ text: "The signing wallet changed. Refresh and try again.", alert: true });
+      setDisputeStep({ kind: "idle" });
+      return;
+    }
     setBusyAction("dispute");
     setNotice(undefined);
     try {
@@ -415,6 +462,15 @@ export function BookingActions({
     const canRetryRelease = pendingAction === "release" && viewer === "provider" && Boolean(session);
     return (
       <div className="booking-actions">
+        {walletConfirm && (
+          <WalletAddressConfirm
+            address={walletConfirm.address}
+            confirmLabel="Confirm and release"
+            busy={isBusy}
+            onConfirm={() => void confirmWalletAction()}
+            onCancel={() => setWalletConfirm(undefined)}
+          />
+        )}
         {!notice && (
           <p className="booking-card__notice" aria-live="polite">
             {canRetryRelease
@@ -428,13 +484,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
-              onClick={() =>
-                void runAction(
-                  "release",
-                  () => releaseDeposit(id, session!),
-                  "Release sent again. Waiting for it to confirm.",
-                )
-              }
+              onClick={() => setWalletConfirm({ kind: "release", address: session!.walletAddress })}
             >
               {busyAction === "release" ? "Confirm with your passkey…" : "Retry release"}
             </button>
@@ -465,6 +515,23 @@ export function BookingActions({
 
   return (
     <div className="booking-actions">
+      {walletConfirm && (
+        <WalletAddressConfirm
+          address={walletConfirm.address}
+          confirmLabel={
+            walletConfirm.kind === "dispute"
+              ? "Confirm and open dispute"
+              : walletConfirm.kind === "pay-balance"
+                ? "Confirm and pay"
+                : walletConfirm.kind === "release"
+                  ? "Confirm and release"
+                  : "Confirm and continue"
+          }
+          busy={isBusy}
+          onConfirm={() => void confirmWalletAction()}
+          onCancel={() => setWalletConfirm(undefined)}
+        />
+      )}
       {freeWindowEnded && canDispute && disputeStep.kind === "idle" && (
         <p className="booking-card__notice" aria-live="polite">
           The free-cancellation window has ended.
@@ -477,7 +544,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
-              onClick={() => void runAction("complete", () => completeAppointment(id, session!), "Marked complete. Waiting for it to confirm.")}
+              onClick={() => setWalletConfirm({ kind: "complete", address: session!.walletAddress })}
             >
               {busyAction === "complete" ? "Confirm with your passkey…" : "Mark appointment complete"}
             </button>
@@ -487,7 +554,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
-              onClick={() => void runAction("approve", () => approveAppointment(id, session!), "Approved. Waiting for it to confirm.")}
+              onClick={() => setWalletConfirm({ kind: "approve", address: session!.walletAddress })}
             >
               {busyAction === "approve" ? "Confirm with your passkey…" : "Approve"}
             </button>
@@ -497,7 +564,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
-              onClick={() => void runAction("release", () => releaseDeposit(id, session!), "Released. Waiting for it to confirm.")}
+              onClick={() => setWalletConfirm({ kind: "release", address: session!.walletAddress })}
             >
               {busyAction === "release" ? "Confirm with your passkey…" : "Release deposit"}
             </button>
@@ -509,9 +576,11 @@ export function BookingActions({
                   type="button"
                   className="button-ghost"
                   disabled={isBusy}
-                  onClick={() =>
-                    void pickDisputeReason(viewer === "client" ? "client-cancel" : "provider-cancel")
-                  }
+                  onClick={() => setWalletConfirm({
+                    kind: "dispute",
+                    address: session!.walletAddress,
+                    reason: viewer === "client" ? "client-cancel" : "provider-cancel",
+                  })}
                 >
                   {busyAction === "dispute" ? "Opening…" : "Cancel booking"}
                 </button>
@@ -528,7 +597,7 @@ export function BookingActions({
         <div className="booking-card__balance-actions">
           <p className="booking-card__balance-note">{LOCAL_CURRENCY_UNAVAILABLE_NOTE}</p>
           <div className="booking-card__actions">
-            <button type="button" className="button-primary" disabled={isBusy} onClick={() => void handlePayBalance()}>
+            <button type="button" className="button-primary" disabled={isBusy} onClick={() => setWalletConfirm({ kind: "pay-balance", address: session!.walletAddress })}>
               {busyAction === "pay-balance"
                 ? "Confirm with your passkey…"
                 : busyAction === "confirming-balance"
@@ -566,7 +635,13 @@ export function BookingActions({
           <p>What's this about?</p>
           <div className="booking-card__actions">
             {DISPUTE_REASON_OPTIONS[viewer].map((option) => (
-              <button key={option.value} type="button" className="button-ghost" disabled={isBusy} onClick={() => void pickDisputeReason(option.value)}>
+              <button
+                key={option.value}
+                type="button"
+                className="button-ghost"
+                disabled={isBusy}
+                onClick={() => setWalletConfirm({ kind: "dispute", address: session!.walletAddress, reason: option.value })}
+              >
                 {option.label}
               </button>
             ))}
@@ -581,14 +656,14 @@ export function BookingActions({
         <div className="booking-card__dispute-panel">
           <p>{policyStatement(disputeStep.suggestedOutcome, formatTryAmount(deposit.amount), viewer)}</p>
           <p>This needs resolution. Pactly will resolve it as the named dispute resolver -- nothing moves until then.</p>
-          <div className="booking-card__actions">
-            <button type="button" className="button-primary" disabled={isBusy} onClick={() => void confirmDispute()}>
-              {busyAction === "dispute" ? "Confirm with your passkey…" : "Confirm and open dispute"}
-            </button>
-            <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setDisputeStep({ kind: "idle" })}>
-              Never mind
-            </button>
-          </div>
+          <WalletAddressConfirm
+            address={session!.walletAddress}
+            confirmLabel={busyAction === "dispute" ? "Confirm with your passkey…" : "Confirm and open dispute"}
+            cancelLabel="Never mind"
+            busy={isBusy}
+            onConfirm={() => void confirmDispute()}
+            onCancel={() => setDisputeStep({ kind: "idle" })}
+          />
         </div>
       )}
 
