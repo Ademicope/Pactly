@@ -40,7 +40,6 @@ import type {
   ShopReportSubmitResponse,
   ShopReportsListResponse,
 } from "./types";
-import { FALLBACK_TRY_PER_USDC } from "../lib/money";
 import type { Session } from "../wallet";
 
 export function useCategories() {
@@ -492,21 +491,27 @@ export function decideProviderApplication(
 }
 
 // ---------------------------------------------------------------------------
-// TRY display rate. End users never see the escrow asset: every amount is
-// shown in lira at this rate (`components/TryAmount.tsx`).
+// Anchor local-currency rate. End users never see the escrow asset.
 // ---------------------------------------------------------------------------
 
 export interface TryRate {
-  /** TRY per 1 USDC, decimal string. */
+  /** Local currency units per 1 USDC, decimal string. */
   rate: string;
   /** `true` while `GET /rate` has not answered (or failed) and the built-in
    * constant is in use -- callers prefix such amounts with "≈". */
   isFallback: boolean;
+  currency: string;
+  decimals: number;
   /** UTC epoch seconds, absent on fallback. */
   quotedAt?: number;
 }
 
-const FALLBACK_TRY_RATE: TryRate = { rate: FALLBACK_TRY_PER_USDC, isFallback: true };
+const FALLBACK_TRY_RATE: TryRate = {
+  rate: "",
+  isFallback: true,
+  currency: "",
+  decimals: 0,
+};
 
 /** `GET /rate`, cached for a minute, one retry. Never throws to the
  * caller: a failure (or the endpoint not existing yet) falls back to
@@ -514,15 +519,30 @@ const FALLBACK_TRY_RATE: TryRate = { rate: FALLBACK_TRY_PER_USDC, isFallback: tr
  * never blank an amount. */
 export function useTryRate(): TryRate {
   const query = useQuery({
-    queryKey: ["rate", "TRY"],
+    queryKey: ["rate"],
     queryFn: () => apiGet<RateResponse>("/rate"),
     staleTime: 60_000,
     retry: 1,
     select: (data): TryRate => {
-      if (typeof data?.rate !== "string" || !/^\d+(\.\d+)?$/.test(data.rate) || Number(data.rate) <= 0) {
+      if (
+        typeof data?.rate !== "string"
+        || !/^\d+(\.\d+)?$/.test(data.rate)
+        || Number(data.rate) <= 0
+        || typeof data.currency !== "string"
+        || data.currency.trim() === ""
+        || !Number.isInteger(data.decimals)
+        || data.decimals < 0
+        || data.decimals > 7
+      ) {
         return FALLBACK_TRY_RATE;
       }
-      return { rate: data.rate, isFallback: false, quotedAt: data.quotedAt };
+      return {
+        rate: data.rate,
+        isFallback: false,
+        currency: data.currency.trim(),
+        decimals: data.decimals,
+        quotedAt: data.quotedAt,
+      };
     },
   });
   return query.data ?? FALLBACK_TRY_RATE;

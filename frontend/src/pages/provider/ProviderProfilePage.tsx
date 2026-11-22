@@ -52,7 +52,7 @@ export function ProviderProfilePage() {
     setReportNotice(undefined);
     
     try {
-      await submitShopReport(id, reportReason, session.token);
+      await submitShopReport(id, reportReason, session);
       setReportNotice({ text: "Report submitted. Admins will review it.", isError: false });
       setReportReason("");
       setTimeout(() => {

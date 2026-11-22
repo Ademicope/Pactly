@@ -29,6 +29,7 @@ export interface TryRate {
   rate: string;
   /** The anchor's advertised fiat currency -- `"TRY"`. */
   currency: string;
+  decimals: number;
   /** Epoch seconds the underlying price was fetched at. */
   quotedAt: number;
 }
@@ -51,7 +52,12 @@ export async function getTryRate(options: GetTryRateOptions = {}): Promise<TryRa
       { amount: ONE_USDC },
       { fetchImpl: options.fetchImpl, now: options.now, forceRefresh: true },
     );
-    const value: TryRate = { rate: price.fiat.amount, currency: price.fiat.currency, quotedAt: price.quotedAt };
+    const value: TryRate = {
+      rate: price.fiat.amount,
+      currency: price.fiat.currency,
+      decimals: price.fiat.decimals,
+      quotedAt: price.quotedAt,
+    };
     cached = { value, fetchedAtMs: nowMs };
     return value;
   } catch (error) {

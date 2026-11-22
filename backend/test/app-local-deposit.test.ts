@@ -37,6 +37,10 @@ ANCHOR_QUOTE_SERVER="https://${HOME}/sep38"
 [[CURRENCIES]]
 code="USDC"
 issuer="${USDC_ISSUER}"
+
+[[CURRENCIES]]
+code="TRY"
+display_decimals=2
 `;
 }
 

@@ -40,11 +40,7 @@ const PRICE_CACHE_TTL_MS = 60_000;
  * matching `frontend/src/lib/money.ts` and `escrow/trustless-work/
  * reconciler.ts`'s `humanDecimalToSmallestUnits`. */
 const SMALLEST_UNIT_DECIMALS = 7;
-/** The anchor's own USDC `display_decimals` (its `stellar.toml`'s
- * `[[CURRENCIES]]` entry) -- also the granularity the price cache rounds
- * to, since no display ever shows finer than this. */
-const DISPLAY_DECIMALS = 2;
-const CACHE_ROUNDING_UNIT = 10n ** BigInt(SMALLEST_UNIT_DECIMALS - DISPLAY_DECIMALS);
+/** USDC cache rounding is applied using the anchor fiat precision below. */
 
 /** Minimal shape this module needs from `fetch` -- a superset of
  * `stellar-toml.ts`'s `FetchLike` (adds `.json()`), so the one seam a
@@ -115,6 +111,8 @@ interface AnchorQuoteConfig {
   /** The fiat currency code, read from the anchor's own `sep38/info` --
    * never hard-coded (NFR12). */
   currency: string;
+  /** Anchor-configured display precision for the fiat currency. */
+  decimals: number;
 }
 
 let cachedConfig: AnchorQuoteConfig | undefined;
@@ -187,8 +185,20 @@ async function resolveQuoteConfig(fetchImpl: Sep38FetchLike, forceRefresh: boole
   if (!currency) {
     throw new AnchorQuoteUnsupportedError(`${homeDomain}'s SEP-38 advertised a fiat asset with no currency code: "${buyAsset}"`);
   }
+  const currencyEntry = endpoints.currencies.find((entry) => entry.code === currency);
+  if (!currencyEntry || currencyEntry.displayDecimals === undefined) {
+    throw new AnchorQuoteUnavailableError(
+      `${homeDomain}'s stellar.toml has no display_decimals configuration for ${currency}`,
+    );
+  }
+  if (currencyEntry.displayDecimals < 0 || currencyEntry.displayDecimals > SMALLEST_UNIT_DECIMALS) {
+    throw new AnchorQuoteUnavailableError(
+      `${homeDomain}'s ${currency} display_decimals configuration is invalid`,
+    );
+  }
+  const decimals = currencyEntry.displayDecimals;
 
-  cachedConfig = { quoteServer: endpoints.quoteServer, sellAsset, buyAsset, assetCode: usdc.code, currency };
+  cachedConfig = { quoteServer: endpoints.quoteServer, sellAsset, buyAsset, assetCode: usdc.code, currency, decimals };
   return cachedConfig;
 }
 
@@ -212,6 +222,7 @@ function smallestUnitsToDecimalString(amount: bigint, decimals = SMALLEST_UNIT_D
 interface CachedPrice {
   fiatAmount: string;
   currency: string;
+  decimals: number;
   quotedAtMs: number;
 }
 
@@ -250,6 +261,8 @@ export interface IndicativePrice {
     /** Whatever the anchor advertises (`sep38/info`), never a hard-coded
      * TRY (NFR12). */
     currency: string;
+    /** Display decimals reported by the anchor's `[[CURRENCIES]]` entry. */
+    decimals: number;
   };
   /** Epoch seconds -- this codebase's own convention
    * (`services/booking.ts`'s `holdExpiresAt`), not a Date object. */
@@ -277,14 +290,15 @@ export async function fetchIndicativePrice(
 
   const cfg = await resolveQuoteConfig(fetchImpl, options.forceRefresh ?? false);
 
-  const roundedAmount = (amountUnits / CACHE_ROUNDING_UNIT) * CACHE_ROUNDING_UNIT;
+  const cacheRoundingUnit = 10n ** BigInt(SMALLEST_UNIT_DECIMALS - cfg.decimals);
+  const roundedAmount = (amountUnits / cacheRoundingUnit) * cacheRoundingUnit;
   const cacheKey = `${cfg.sellAsset}|${cfg.buyAsset}|${roundedAmount.toString()}`;
   const cached = options.forceRefresh ? undefined : priceCache.get(cacheKey);
   if (cached && nowMs - cached.quotedAtMs < PRICE_CACHE_TTL_MS) {
     return {
       amount,
       asset: cfg.assetCode,
-      fiat: { amount: cached.fiatAmount, currency: cached.currency },
+      fiat: { amount: cached.fiatAmount, currency: cached.currency, decimals: cached.decimals },
       quotedAt: Math.floor(cached.quotedAtMs / 1000),
       spreadApplied: true,
     };
@@ -318,12 +332,12 @@ export async function fetchIndicativePrice(
   }
   const fiatAmount = buyAmount.trim();
 
-  priceCache.set(cacheKey, { fiatAmount, currency: cfg.currency, quotedAtMs: nowMs });
+  priceCache.set(cacheKey, { fiatAmount, currency: cfg.currency, decimals: cfg.decimals, quotedAtMs: nowMs });
 
   return {
     amount,
     asset: cfg.assetCode,
-    fiat: { amount: fiatAmount, currency: cfg.currency },
+    fiat: { amount: fiatAmount, currency: cfg.currency, decimals: cfg.decimals },
     quotedAt: Math.floor(nowMs / 1000),
     spreadApplied: true,
   };

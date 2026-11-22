@@ -26,6 +26,10 @@ ANCHOR_QUOTE_SERVER="https://tr-mock-anchor.fly.dev/sep38"
 [[CURRENCIES]]
 code="USDC"
 issuer="${USDC_ISSUER}"
+
+[[CURRENCIES]]
+code="TRY"
+display_decimals=2
 `;
 
 const SEP38_INFO_BODY = { assets: [{ asset: SELL_ASSET }, { asset: "iso4217:TRY" }] };
@@ -59,13 +63,13 @@ test("GET /quote?amount=... returns the USDC amount, its fiat equivalent, and th
     const body = (await response.json()) as {
       amount: string;
       asset: string;
-      fiat: { amount: string; currency: string };
+      fiat: { amount: string; currency: string; decimals: number };
       quotedAt: number;
       spreadApplied: boolean;
     };
     assert.equal(body.amount, "4500000000");
     assert.equal(body.asset, "USDC");
-    assert.deepEqual(body.fiat, { amount: "21843.51", currency: "TRY" });
+    assert.deepEqual(body.fiat, { amount: "21843.51", currency: "TRY", decimals: 2 });
     assert.equal(body.spreadApplied, true);
     assert.equal(typeof body.quotedAt, "number");
   } finally {

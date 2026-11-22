@@ -64,6 +64,8 @@ export interface AnchorSepEndpoints {
   kycServer?: string;
   /** SEP-38. */
   quoteServer?: string;
+  /** `[[CURRENCIES]]` entries used by the anchor, including display precision. */
+  currencies: Array<{ code?: string; issuer?: string; displayDecimals?: number }>;
 }
 
 function requireField(toml: Record<string, unknown>, key: string, homeDomain: string): string {
@@ -114,12 +116,26 @@ export function parseSepEndpoints(tomlBody: string, homeDomain: string): AnchorS
     throw new AnchorDiscoveryError(`${homeDomain}'s stellar.toml did not parse to a table`);
   }
   const table = parsed as Record<string, unknown>;
+  const rawCurrencies = table.CURRENCIES;
+  const currencies: AnchorSepEndpoints["currencies"] = Array.isArray(rawCurrencies)
+    ? rawCurrencies
+        .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+        .map((entry) => ({
+          code: typeof entry.code === "string" ? entry.code.trim() : undefined,
+          issuer: typeof entry.issuer === "string" ? entry.issuer.trim() : undefined,
+          displayDecimals:
+            typeof entry.display_decimals === "number" && Number.isInteger(entry.display_decimals)
+              ? entry.display_decimals
+              : undefined,
+        }))
+    : [];
   return {
     webAuthEndpoint: requireHttpsUrlField(table, "WEB_AUTH_ENDPOINT", homeDomain),
     signingKey: requireField(table, "SIGNING_KEY", homeDomain),
     transferServer: optionalField(table, "TRANSFER_SERVER"),
     kycServer: optionalField(table, "KYC_SERVER"),
     quoteServer: optionalField(table, "ANCHOR_QUOTE_SERVER"),
+    currencies,
   };
 }
 

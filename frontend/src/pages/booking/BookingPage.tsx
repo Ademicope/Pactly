@@ -14,6 +14,7 @@ import {
   useHoldSlot,
   usePublicProviderProfile,
   verifyAnchorChallenge,
+  useTryRate,
 } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { HoldSlotResponse, LocalDepositView } from "../../api/types";
@@ -106,7 +107,7 @@ export function BookingPage() {
   const [flowNotice, setFlowNotice] = useState<string | undefined>();
   const [flowFatalError, setFlowFatalError] = useState<string | undefined>();
   const [needsSignIn, setNeedsSignIn] = useState(false);
-  // 2026-09 pivot: the TRY bank transfer is the only way to pay the
+  // 2026-09 pivot: the anchor bank transfer is the only way to pay the
   // deposit -- there is no payment-method choice any more, so the local
   // transfer state below is always the live path once a hold exists.
   const [localDeposit, setLocalDeposit] = useState<LocalDepositView | undefined>();
@@ -129,6 +130,7 @@ export function BookingPage() {
 
   const resumeAttemptedRef = useRef(false);
   const formatTryAmount = useFormatTry();
+  const { currency: anchorCurrency, isFallback: currencyUnavailable } = useTryRate();
 
   const isLocked = phase === "locked";
   const booking = useBooking(hold?.bookingId, session, {
@@ -724,7 +726,7 @@ export function BookingPage() {
               <p className="booking-step">Step 1 · Slot held{holdSecondsLeft !== undefined ? ` · ${formatCountdown(holdSecondsLeft)} left` : ""}</p>
               <p className="booking-step">Step 2 · Pay the deposit by bank transfer</p>
               <p className="local-deposit__how">
-                Send the deposit in TRY to the bank details below. Trustless Work holds it in escrow — not Pactly, not the provider.
+                Send the deposit in {currencyUnavailable ? "your anchor currency" : anchorCurrency} to the bank details below. Trustless Work holds it in escrow — not Pactly, not the provider.
               </p>
 
               <div className="booking-pay__action">

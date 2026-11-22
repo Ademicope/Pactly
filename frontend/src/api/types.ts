@@ -343,6 +343,7 @@ export interface QuoteResponse {
   fiat: {
     amount: string;
     currency: string;
+    decimals: number;
   };
   /** UTC epoch seconds. */
   quotedAt: number;
@@ -354,7 +355,8 @@ export interface QuoteResponse {
  * booking, never used to compute a deposit server-side (AD-7). */
 export interface RateResponse {
   rate: string;
-  currency: "TRY";
+  currency: string;
+  decimals: number;
   /** UTC epoch seconds. */
   quotedAt: number;
 }

@@ -1,14 +1,20 @@
 import { useCallback } from "react";
 
 import { useTryRate } from "../api/hooks";
-import { formatTry } from "../lib/money";
+import { formatCurrency } from "../lib/money";
 
 /** The one formatter for an amount that has to live inside a sentence
  * (a button label, a policy statement) rather than its own element --
  * same rate, same "≈" rule as {@link TryAmount}. */
 export function useFormatTry(): (amountSmallestUnit: string) => string {
-  const { rate, isFallback } = useTryRate();
-  return useCallback((amountSmallestUnit: string) => `${isFallback ? "≈ " : ""}${formatTry(amountSmallestUnit, rate)}`, [rate, isFallback]);
+  const { rate, currency, decimals, isFallback } = useTryRate();
+  return useCallback(
+    (amountSmallestUnit: string) =>
+      !currency || isFallback
+        ? "Currency unavailable"
+        : formatCurrency(amountSmallestUnit, rate, currency, decimals),
+    [rate, currency, decimals, isFallback],
+  );
 }
 
 export interface TryAmountProps {

@@ -15,7 +15,7 @@ import type { ProviderApplication } from "../../api/types";
 import { PageMasthead } from "../../components/PageMasthead";
 import { SignInPanel } from "../../components/SignInPanel";
 import { useFormatTry } from "../../components/TryAmount";
-import { tryToUsdcSmallestUnit, usdcToTry } from "../../lib/money";
+import { currencyToUsdcSmallestUnit, usdcToCurrency } from "../../lib/money";
 import { formatSessionFormat } from "../../lib/sessionFormat";
 import { getSession, signOut, type Session } from "../../wallet";
 
@@ -53,7 +53,7 @@ const EMPTY_FORM: FormValues = {
  * in TRY at `rate` and converted back on submit -- a re-application may
  * therefore land a smallest-unit or so away from the rejected one, which
  * is fine: it is a fresh application, not an edit of a live price. */
-function formFromApplication(application: ProviderApplication, rate: string): FormValues {
+function formFromApplication(application: ProviderApplication, rate: string, decimals: number): FormValues {
   return {
     name: application.name,
     title: application.title,
@@ -62,7 +62,7 @@ function formFromApplication(application: ProviderApplication, rate: string): Fo
     serviceDescription: application.serviceDescription,
     sessionFormat: application.sessionFormat,
     sessionLengthMinutes: String(application.sessionLengthMinutes),
-    price: usdcToTry(application.price.amount, rate),
+    price: usdcToCurrency(application.price.amount, rate, decimals),
     depositRatePercent: String(application.depositRateBps / 100),
     cancellationWindowHours: String(application.cancellationWindowHours),
   };
@@ -82,7 +82,7 @@ export function ApplyPage() {
   const applicationQuery = useOwnProviderApplication(session);
   const profileQuery = useOwnProviderProfile(session);
   const submit = useSubmitProviderApplication(session);
-  const { rate } = useTryRate();
+  const { rate, decimals } = useTryRate();
 
   function handleSignOut(): void {
     signOut();
@@ -232,7 +232,7 @@ export function ApplyPage() {
       <ApplicationForm
         key={application?.id ?? "new"}
         session={session}
-        initial={application ? formFromApplication(application, rate) : EMPTY_FORM}
+        initial={application ? formFromApplication(application, rate, decimals) : EMPTY_FORM}
         categories={categoriesQuery.data?.categories ?? []}
         pending={submit.isPending}
         error={submit.error}
@@ -262,11 +262,11 @@ function ApplicationForm({ session, initial, categories, pending, error, onSubmi
         ? "Connection dropped. Nothing was sent."
         : undefined;
 
-  const { rate } = useTryRate();
+  const { rate, currency, decimals, isFallback } = useTryRate();
   const formatTryAmount = useFormatTry();
   const [priceTouched, setPriceTouched] = useState(false);
   // Typed in TRY, sent in USDC smallest units (AD-7) at the rate on screen.
-  const priceSmallestUnit = tryToUsdcSmallestUnit(values.price, rate);
+  const priceSmallestUnit = isFallback ? undefined : currencyToUsdcSmallestUnit(values.price, rate, decimals);
   const depositRateBps = Math.round(Number(values.depositRatePercent) * 100);
   const previewInput =
     priceSmallestUnit && Number.isInteger(depositRateBps)
@@ -383,10 +383,10 @@ function ApplicationForm({ session, initial, categories, pending, error, onSubmi
       <h2 style={{ fontSize: "var(--text-18)", marginTop: "var(--space-4)" }}>Your rules</h2>
       <div className="apply-form__row">
         <div className="field">
-          <label htmlFor="apply-price">Price (TRY)</label>
+          <label htmlFor="apply-price">Price ({currency || "Currency unavailable"})</label>
           <input id="apply-price" inputMode="decimal" value={values.price} onChange={(e) => set("price", e.target.value)} onBlur={() => setPriceTouched(true)} placeholder="1200 or 1.200,50" required />
           {(priceTouched || values.price.trim() !== "") && !priceSmallestUnit && (
-            <p className="field__error">Enter the price in lira, e.g. 1200 or 1.200,50.</p>
+            <p className="field__error">Enter the price using up to {decimals} decimals.</p>
           )}
           {(details.priceAmount || previewDetails.priceAmount) && (
             <p className="field__error">{details.priceAmount ?? previewDetails.priceAmount}</p>

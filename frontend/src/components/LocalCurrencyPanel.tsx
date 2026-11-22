@@ -3,6 +3,7 @@ import { useState } from "react";
 import { ApiError } from "../api/client";
 import type { LocalDepositView } from "../api/types";
 import { TryAmount } from "./TryAmount";
+import { useTryRate } from "../api/hooks";
 
 export interface LocalCurrencyPanelProps {
   deposit: LocalDepositView;
@@ -47,6 +48,8 @@ function CopyRow({ label, value }: { label: string; value: string }) {
  */
 export function LocalCurrencyPanel({ deposit, amount, busy, onSimulate, onRetry }: LocalCurrencyPanelProps) {
   const { bankDetails } = deposit;
+  const { currency, isFallback } = useTryRate();
+  const currencyLabel = isFallback ? "local currency" : currency;
   return (
     <div className="local-deposit">
       <p className="local-deposit__status" aria-live="polite">
@@ -73,14 +76,14 @@ export function LocalCurrencyPanel({ deposit, amount, busy, onSimulate, onRetry 
         </p>
       )}
       {deposit.status === "waiting" && (
-        <p className="local-deposit__how">This is a sandbox bank. Confirm the TRY send below — no real transfer is made.</p>
+        <p className="local-deposit__how">This is a sandbox bank. Confirm the {currencyLabel} send below — no real transfer is made.</p>
       )}
       {deposit.status === "paying" && (
         <p className="local-deposit__how">Your transfer is in. Pactly is confirming it — this usually takes a moment.</p>
       )}
       {deposit.sandbox && deposit.status === "waiting" && (
         <button type="button" className="button-primary" disabled={busy} onClick={onSimulate}>
-          {busy ? "Confirming…" : "Confirm TRY sent"}
+          {busy ? "Confirming…" : `Confirm ${currencyLabel} sent`}
         </button>
       )}
       {deposit.status === "failed" && (
