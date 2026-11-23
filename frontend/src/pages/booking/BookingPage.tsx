@@ -360,6 +360,10 @@ export function BookingPage() {
           setHoldError({ message: "That slot isn't available anymore." });
           return;
         }
+        if (error.code === "SLOT_IN_PAST") {
+          setHoldError({ message: "This slot has already started. Please pick a later slot." });
+          return;
+        }
         if (error.code === "TOO_MANY_HOLDS") {
           setHoldError({
             message: "You already have slots on hold. Open My bookings and continue one of those — don't hold a new slot.",
@@ -394,6 +398,12 @@ export function BookingPage() {
     const described = describeError(error);
     setFlowFatalError(described.message);
     if (error instanceof ApiError && error.code === "HOLD_EXPIRED") {
+      setHold(undefined);
+      engineRef.current = {};
+      setPhase("idle");
+      return;
+    }
+    if (error instanceof ApiError && error.code === "SLOT_IN_PAST") {
       setHold(undefined);
       engineRef.current = {};
       setPhase("idle");

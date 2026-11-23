@@ -189,6 +189,15 @@ const STATEMENTS: readonly string[] = [
     reason TEXT NOT NULL,
     created_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS waitlist_entries (
+    id TEXT PRIMARY KEY,
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    client_wallet_address TEXT NOT NULL,
+    date TEXT NOT NULL,
+    note TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE (provider_profile_id, client_wallet_address, date)
+  )`,
 ];
 
 /** `true` when `table` already has a column named `column` -- `PRAGMA
@@ -311,6 +320,10 @@ export function runMigrations(sqlite: Database): void {
   }
   if (!hasColumn(sqlite, "escrow_dispute_openings", "opened_by_role")) {
     sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN opened_by_role TEXT`);
+  }
+  // Issue #44: dispute withdrawal -- preserve the note on the withdrawn record
+  if (!hasColumn(sqlite, "escrow_dispute_openings", "withdrawn_at")) {
+    sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN withdrawn_at INTEGER`);
   }
 
   // Story 3.7: paying the balance before the session -- independent of the

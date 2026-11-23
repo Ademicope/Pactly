@@ -11,7 +11,7 @@
  * distribution plus its recorded decision.
  */
 import "./testConfigEnv.js";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
@@ -20,7 +20,7 @@ import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { BookingEscrowStateError, fundDeposit, lockDeposit, resolveBookingDispute, setBalanceState } from "../src/services/booking.js";
 import { getEscrowDisputeResolution } from "../src/db/escrowDisputeResolutions.js";
 import { getBookingById, recordDeploySubmission, updateEscrowContractId, updateEscrowStateSync } from "../src/db/bookings.js";
-import { bookings } from "../src/db/schema.js";
+import { bookings, availabilitySlots } from "../src/db/schema.js";
 import { insertEscrowProcessedEventIfNew } from "../src/db/escrowProcessedEvents.js";
 import type { Db } from "../src/db/client.js";
 import type {
@@ -389,19 +389,28 @@ test("fundDeposit refuses once escrow_state is already set", async () => {
   }
 });
 
-test("fundDeposit refuses once the hold has expired with escrow_state still null (Story 3.4 review)", async () => {
+test("fundDeposit refuses when the slot has already started (SlotInPastError)", async () => {
   const result = openTestDatabase();
   try {
-    const bookingId = await seedBooking(result);
+    const providerProfileId = await seedProviderProfile(result, { isApproved: true });
+    const now = Math.floor(Date.now() / 1000);
+    const slotStartsAt = now - 3600; // slot started 1 hour ago
+    const slotId = randomUUID();
+    await result.db.insert(availabilitySlots).values({
+      id: slotId,
+      providerProfileId,
+      startsAt: slotStartsAt,
+      createdAt: Date.now(),
+    });
+    const bookingId = await seedBooking(result, { providerProfileId });
+    await result.db.update(bookings).set({ slotId }).where(eq(bookings.id, bookingId));
     const contractId = fakeContractId();
-    const past = Math.floor(Date.now() / 1000) - 1;
     await updateEscrowContractId(result.db, bookingId, contractId, "unsigned-xdr", "deploy-tx-hash");
-    await recordDeploySubmission(result.db, bookingId, contractId, "deploy-tx-hash", past, past - 600);
-    await result.db.update(bookings).set({ holdExpiresAt: past }).where(eq(bookings.id, bookingId));
+    await recordDeploySubmission(result.db, bookingId, contractId, "deploy-tx-hash", now - 100, now - 700);
 
     await assert.rejects(
-      () => fundDeposit(result.db, bookingId, unreachableEscrowAdapter(), { now: past + 1 }),
-      (error: unknown) => error instanceof Error && error.name === "BookingHoldExpiredError",
+      () => fundDeposit(result.db, bookingId, unreachableEscrowAdapter(), { now }),
+      (error: unknown) => error instanceof Error && error.name === "SlotInPastError",
     );
   } finally {
     closeDatabase(result);

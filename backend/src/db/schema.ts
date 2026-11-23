@@ -642,6 +642,9 @@ export const escrowDisputeOpenings = sqliteTable("escrow_dispute_openings", {
    * `cancelDeadline`, which `suggestedOutcome`'s own client-cancel branch
    * compares it against). */
   openedAt: integer("opened_at").notNull(),
+  /** UTC epoch seconds when the dispute was withdrawn by its opener. Null
+   * while the dispute is still open. */
+  withdrawnAt: integer("withdrawn_at"),
 });
 
 /**
@@ -659,3 +662,28 @@ export const shopReports = sqliteTable("shop_reports", {
   /** UTC epoch seconds. */
   createdAt: integer("created_at").notNull(),
 });
+
+/**
+ * Waitlist: a client can join a waitlist for a specific shop and date when
+ * no open slots are available. One entry per client per shop per date.
+ * Does not hold a slot or take a deposit.
+ */
+export const waitlistEntries = sqliteTable(
+  "waitlist_entries",
+  {
+    id: text("id").primaryKey(),
+    providerProfileId: text("provider_profile_id")
+      .notNull()
+      .references(() => providerProfiles.id),
+    clientWalletAddress: text("client_wallet_address").notNull(),
+    /** The UTC calendar date in YYYY-MM-DD form. */
+    date: text("date").notNull(),
+    /** Optional note from the client, capped at 300 characters. */
+    note: text("note"),
+    /** UTC epoch seconds. */
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [unique().on(table.providerProfileId, table.clientWalletAddress, table.date)],
+);
+
+export type WaitlistEntryRow = typeof waitlistEntries.$inferSelect;

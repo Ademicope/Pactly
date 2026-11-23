@@ -170,6 +170,7 @@ export async function listApprovedProviderProfilesForDiscover(
       depositRateBps: providerProfiles.depositRateBps,
       cancellationWindowHours: providerProfiles.cancellationWindowHours,
       bufferMinutes: providerProfiles.bufferMinutes,
+      minimumNoticeMinutes: providerProfiles.minimumNoticeMinutes,
       isApproved: providerProfiles.isApproved,
       verifiedSessionCount: providerProfiles.verifiedSessionCount,
       providerCancellationCount: providerProfiles.providerCancellationCount,

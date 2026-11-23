@@ -34,11 +34,11 @@ export interface NewEscrowDisputeOpening {
  * in principle be followed by a fresh one on the same booking id in a later
  * story, so this stays an upsert rather than an insert-only write. The
  * booking-level precondition is `submitSignedTransaction`'s own job, checked
- * before this is ever called. */
+ * before this is ever called. Does not overwrite `withdrawnAt` if already set. */
 export async function recordEscrowDisputeOpening(db: Db, values: NewEscrowDisputeOpening): Promise<void> {
   await db
     .insert(escrowDisputeOpenings)
-    .values({ ...values, suggestedOutcome: values.suggestedOutcome ?? null })
+    .values({ ...values, suggestedOutcome: values.suggestedOutcome ?? null, withdrawnAt: null })
     .onConflictDoUpdate({
       target: escrowDisputeOpenings.bookingId,
       set: {
@@ -49,6 +49,7 @@ export async function recordEscrowDisputeOpening(db: Db, values: NewEscrowDisput
         suggestedOutcome: values.suggestedOutcome ?? null,
         txHash: values.txHash,
         openedAt: values.openedAt,
+        withdrawnAt: null,
       },
     });
 }

@@ -58,6 +58,8 @@ export interface ListFutureSlotsOptions {
    * days"). Omitted entirely for a provider's own view, which sees every
    * future slot regardless of how far out it is. */
   withinSeconds?: number;
+  /** Issue #36: minimum notice in minutes -- slots sooner than this are excluded. */
+  minimumNoticeMinutes?: number;
 }
 
 /** Every slot for `providerProfileId` that starts after `now`, ascending --
