@@ -10,6 +10,9 @@ import { config } from "../config.js";
 import {
   AmountOutOfRangeError,
   AnchorQuoteUnavailableError,
+  AnchorQuoteUnsupportedError,
+  QuoteMismatchError,
+  QuoteStaleError,
 } from "../anchor/errors.js";
 import { type AnchorFetchLike } from "../anchor/http.js";
 import {
@@ -22,7 +25,12 @@ import {
   type Sep6Transaction,
 } from "../anchor/sep6-deposit.js";
 import { ensureSep12Approved } from "../anchor/sep12.js";
-import { fetchIndicativePrice } from "../anchor/sep38.js";
+import {
+  DEFAULT_QUOTE_MAX_AGE_SECONDS,
+  fetchIndicativePrice,
+  isQuoteStale,
+  type IndicativePrice,
+} from "../anchor/sep38.js";
 import { resolveUsdcAsset } from "../anchor/usdc.js";
 import {
   extendHoldExpiresAt,
@@ -63,7 +71,12 @@ export class SandboxOnlyError extends Error {
 }
 
 function requireHoldNotExpired(booking: BookingRow, now: number): void {
-  if (booking.escrowState === null && booking.holdExpiresAt !== null && booking.holdExpiresAt <= now) {
+  if (
+    booking.escrowState === null
+    && booking.escrowContractId === null
+    && booking.holdExpiresAt !== null
+    && booking.holdExpiresAt < now
+  ) {
     throw new BookingHoldExpiredError();
   }
 }
@@ -127,12 +140,81 @@ function defaultHorizonUrl(): string {
     : "https://horizon-testnet.stellar.org";
 }
 
+/** The quote a booking screen confirmed just before starting the deposit.
+ * Its `fiat.amount` is the figure the client saw; the backend only accepts it
+ * when it is still within its own age and still names this booking's deposit
+ * amount. */
+export interface ConfirmedQuote {
+  amount: string;
+  quotedAt: number;
+  maxAgeSeconds?: number;
+  fiat: { amount: string; currency: string };
+}
+
 export interface LocalDepositDeps extends GetOrRefreshAnchorJwtDeps {
   fetchImpl?: AnchorFetchLike;
   now?: () => number;
   hasTrustline?: (account: string, assetCode: string, assetIssuer: string) => Promise<boolean>;
   buildTrustline?: BuildPaymentDeps;
   submitTrustline?: SubmitPaymentDeps;
+  /** Optional client-confirmed quote. Accepted only while fresh and for the
+   * right amount; a stale one blocks the deposit rather than being silently
+   * replaced with a server-side price the client never saw. */
+  confirmedQuote?: ConfirmedQuote;
+}
+
+/** Validates the client's confirmed quote against this booking, returning
+ * the exact fiat amount to submit to the anchor. The client's `fiat.amount`
+ * is never trusted on its own: it must match a price the backend fetches
+ * from the anchor for this booking's own deposit amount. If that refresh
+ * fails the deposit stays blocked, rather than falling back to the
+ * client-supplied figure. */
+async function confirmedQuoteAmount(
+  booking: BookingRow,
+  quote: ConfirmedQuote,
+  nowSeconds: number,
+  deps: LocalDepositDeps,
+): Promise<string> {
+  if (quote.amount !== booking.depositAmount) {
+    throw new QuoteMismatchError();
+  }
+  const maxAgeSeconds = quote.maxAgeSeconds ?? DEFAULT_QUOTE_MAX_AGE_SECONDS;
+  if (!Number.isFinite(quote.quotedAt) || isQuoteStale({ quotedAt: quote.quotedAt, maxAgeSeconds }, nowSeconds)) {
+    throw new QuoteStaleError(undefined, {
+      quotedAt: quote.quotedAt,
+      expiresAt: quote.quotedAt + maxAgeSeconds,
+    });
+  }
+  if (typeof quote.fiat?.amount !== "string" || quote.fiat.amount.trim() === "") {
+    throw new QuoteStaleError("The confirmed price has no amount. Refresh it before continuing.");
+  }
+  const confirmedAmount = toTwoDecimalPlaces(quote.fiat.amount);
+
+  // Re-fetch rather than reading the short-lived price cache: the amount
+  // submitted to the anchor must be checked against its current price, not
+  // one this backend happened to cache earlier. Any failure here propagates
+  // and blocks the deposit.
+  let serverQuote: IndicativePrice;
+  try {
+    serverQuote = await fetchIndicativePrice(
+      { amount: booking.depositAmount },
+      { fetchImpl: deps.fetchImpl, now: deps.now, forceRefresh: true },
+    );
+  } catch (error) {
+    if (error instanceof AnchorQuoteUnavailableError || error instanceof AnchorQuoteUnsupportedError) {
+      throw error;
+    }
+    throw new AnchorQuoteUnavailableError(
+      `Could not refresh the confirmed price before starting the deposit: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const serverAmount = toTwoDecimalPlaces(serverQuote.fiat.amount);
+  if (confirmedAmount !== serverAmount) {
+    throw new QuoteMismatchError(
+      "The confirmed price no longer matches the anchor's current price. Refresh it before continuing.",
+    );
+  }
+  return serverAmount;
 }
 
 function authDeps(deps: LocalDepositDeps): GetOrRefreshAnchorJwtDeps {
@@ -235,7 +317,11 @@ export type OpenLocalDepositResult =
   | { needsTrustline: true; unsignedXdr: string }
   | ({ needsTrustline?: false } & LocalDepositView);
 
-async function enforceLimits(depositAmount: string, fetchImpl: AnchorFetchLike | undefined): Promise<void> {
+async function enforceLimits(
+  depositAmount: string,
+  fetchImpl: AnchorFetchLike | undefined,
+  now?: () => number,
+): Promise<void> {
   const limits = await fetchSep6DepositLimits({ fetchImpl });
   if (!limits.minAmount && !limits.maxAmount) {
     return;
@@ -243,7 +329,7 @@ async function enforceLimits(depositAmount: string, fetchImpl: AnchorFetchLike |
   let fiatAmount: string;
   let currency: string;
   try {
-    const quote = await fetchIndicativePrice({ amount: depositAmount }, { fetchImpl });
+    const quote = await fetchIndicativePrice({ amount: depositAmount }, { fetchImpl, now });
     fiatAmount = quote.fiat.amount;
     currency = quote.fiat.currency;
   } catch (error) {
@@ -284,12 +370,18 @@ async function openAgainstAnchor(
   booking: BookingRow,
   walletAddress: string,
   deps: LocalDepositDeps,
+  confirmedTryAmount?: string,
 ): Promise<LocalDepositView> {
   const nowMs = deps.now?.() ?? Date.now();
   const token = await requireFreshAnchorJwt(db, walletAddress, authDeps(deps));
   await ensureSep12Approved({ token, account: walletAddress }, { fetchImpl: deps.fetchImpl });
-  const quote = await fetchIndicativePrice({ amount: booking.depositAmount }, { fetchImpl: deps.fetchImpl });
-  const tryAmount = toTwoDecimalPlaces(quote.fiat.amount);
+  // A client-confirmed quote wins: it is the figure they actually approved
+  // on screen. Without one, fetch the anchor's current price as before.
+  const tryAmount =
+    confirmedTryAmount ??
+    toTwoDecimalPlaces(
+      (await fetchIndicativePrice({ amount: booking.depositAmount }, { fetchImpl: deps.fetchImpl, now: deps.now })).fiat.amount,
+    );
   const opened = await openSep6Deposit(
     { token, account: walletAddress, amount: tryAmount, memo: booking.id.slice(0, 28) },
     { fetchImpl: deps.fetchImpl },
@@ -317,7 +409,7 @@ export async function openLocalDeposit(
   }
 
   await requireFreshAnchorJwt(db, walletAddress, authDeps(deps));
-  await enforceLimits(booking.depositAmount, deps.fetchImpl);
+  await enforceLimits(booking.depositAmount, deps.fetchImpl, deps.now);
 
   const usdc = await resolveUsdcAsset({ fetchImpl: deps.fetchImpl });
   const hasTrustline = deps.hasTrustline ?? defaultHasTrustline;
@@ -331,7 +423,13 @@ export async function openLocalDeposit(
     return { needsTrustline: true, unsignedXdr: built.unsignedXdr };
   }
 
-  return openAgainstAnchor(db, booking, walletAddress, deps);
+  // A confirmed quote is checked exactly at the point of submitting money:
+  // stale, for another amount or without a fiat figure -> the deposit is
+  // blocked, never submitted at a price the client did not confirm.
+  const confirmedTryAmount = deps.confirmedQuote
+    ? await confirmedQuoteAmount(booking, deps.confirmedQuote, nowSeconds, deps)
+    : undefined;
+  return openAgainstAnchor(db, booking, walletAddress, deps, confirmedTryAmount);
 }
 
 export async function submitLocalDepositTrustline(
@@ -358,7 +456,10 @@ export async function submitLocalDepositTrustline(
     throw new XdrMismatchError();
   }
   await submitBalancePaymentTransaction(signedXdr, deps.submitTrustline ?? {});
-  return openAgainstAnchor(db, booking, walletAddress, deps);
+  const confirmedTryAmount = deps.confirmedQuote
+    ? await confirmedQuoteAmount(booking, deps.confirmedQuote, nowSeconds, deps)
+    : undefined;
+  return openAgainstAnchor(db, booking, walletAddress, deps, confirmedTryAmount);
 }
 
 export async function pollLocalDeposit(
