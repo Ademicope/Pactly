@@ -5,6 +5,7 @@ import {
   fundDepositWithRetry,
   getBooking,
   getLocalDeposit,
+  getQuote,
   lockDeposit,
   openLocalDeposit,
   requestAnchorChallenge,
@@ -17,7 +18,7 @@ import {
   verifyAnchorChallenge,
 } from "../../api/hooks";
 import { ApiError } from "../../api/client";
-import type { BookingView, HoldSlotResponse, LocalDepositView } from "../../api/types";
+import type { HoldSlotResponse, LocalDepositView, QuoteResponse } from "../../api/types";
 import { DepositPill } from "../../components/DepositPill";
 import { EscrowLane } from "../../components/EscrowLane";
 import { LocalCurrencyPanel, localDepositErrorMessage } from "../../components/LocalCurrencyPanel";
@@ -25,8 +26,10 @@ import { LockButton } from "../../components/LockButton";
 import { ProviderHeader } from "../../components/ProviderHeader";
 import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
+import { formatFiatAmount } from "../../lib/money";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
+import { displayedQuoteIsStale, freshQuote, rememberQuote, type DisplayedQuote } from "../../lib/quoteFreshness";
 import { signInErrorMessage } from "../../components/SignInPanel";
 import { getSession, signIn, signOut, signXdr, type Session } from "../../wallet";
 
@@ -114,12 +117,12 @@ export function BookingPage() {
   const [localBusy, setLocalBusy] = useState(false);
   const [localNotice, setLocalNotice] = useState<string | undefined>();
 
-  // Issue #5/#7: what `GET /bookings/:id` says about this booking the moment
-  // the hold comes back -- whether a deploy behind the stored contract id is
-  // already confirmed, and every contract id the booking has had. Read once,
-  // before the client taps anything; `useBooking` below is a different read
-  // that only starts once *this* tab has submitted a fund.
-  const [bookingFacts, setBookingFacts] = useState<BookingView | undefined>();
+  // The local-currency figure this screen is showing comes from a SEP-38
+  // quote. Remember *when we fetched it* so a tab left open cannot keep
+  // presenting an amount the anchor would no longer honour.
+  const [depositQuote, setDepositQuote] = useState<DisplayedQuote | undefined>();
+  const [quoteBusy, setQuoteBusy] = useState(false);
+  const [quoteError, setQuoteError] = useState<string | undefined>();
 
   // Review follow-up: the flow's own "engine" state (which contractId is in
   // play, whether a deploy has actually been submitted) lives in a ref, not
@@ -149,6 +152,28 @@ export function BookingPage() {
     [],
   );
 
+  // The amount the quote prices is always the authoritative deposit amount:
+  // the hold's own once one exists, otherwise the profile's advertised one.
+  const quoteAmount = hold?.deposit.amount ?? profile?.deposit.amount;
+
+  useEffect(() => {
+    if (!quoteAmount) return;
+    let cancelled = false;
+    void getQuote(quoteAmount)
+      .then((quote) => {
+        if (!cancelled) {
+          setDepositQuote(rememberQuote(quote));
+          setQuoteError(undefined);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setQuoteError("We couldn't load the local-currency price.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [quoteAmount]);
+
   // The hold countdown, ticking every second while a hold exists and is
   // not yet locked -- `aria-live="polite"` per the Accessibility Floor.
   useEffect(() => {
@@ -168,7 +193,12 @@ export function BookingPage() {
   // resuming a flow already in progress is a different, allowed case
   // (submit is permitted after expiry; this only covers the *idle* case).
   useEffect(() => {
-    if (phase === "idle" && hold && holdSecondsLeft === 0) {
+    if (
+      phase === "idle"
+      && hold
+      && !engineRef.current.contractId
+      && hold.holdExpiresAt < Math.floor(Date.now() / 1000)
+    ) {
       setHold(undefined);
       setHoldEndedWhileIdle(true);
       engineRef.current = {};
@@ -225,6 +255,11 @@ export function BookingPage() {
     void holdMutation
       .mutateAsync({ providerId, slotStartsAt, token: session.token, tzOffsetMinutes: new Date().getTimezoneOffset() })
       .then((result) => {
+        if (result.isExpiredHold) {
+          setHold(undefined);
+          setHoldEndedWhileIdle(true);
+          return;
+        }
         setHold(result);
         setHoldEndedWhileIdle(false);
       })
@@ -331,7 +366,18 @@ export function BookingPage() {
       // relying on a `useHoldSlot(session)`-style hook whose closure would
       // still hold the *previous* (absent) session on this very first call
       // -- `setSession` above only takes effect on the next render.
-      const result = await holdMutation.mutateAsync({ providerId, slotStartsAt, token: activeSession.token, tzOffsetMinutes: new Date().getTimezoneOffset() });
+      const result = await holdMutation.mutateAsync({
+        providerId,
+        slotStartsAt,
+        token: activeSession.token,
+        tzOffsetMinutes: new Date().getTimezoneOffset(),
+        renewExpired: holdEndedWhileIdle,
+      });
+      if (result.isExpiredHold) {
+        setHold(undefined);
+        setHoldEndedWhileIdle(true);
+        return;
+      }
       setHold(result);
     } catch (error) {
       if (error instanceof ApiError) {
@@ -579,7 +625,7 @@ export function BookingPage() {
         setLocalNotice(`That didn't go through. The slot is still yours for ${formatCountdown(holdSecondsLeft)}.`);
         return;
       }
-      const opened = await submitLocalDepositTrustline(bookingId, signed, activeSession);
+      const opened = await submitLocalDepositTrustline(bookingId, signed, activeSession, depositQuote?.quote);
       if ("needsTrustline" in opened && opened.needsTrustline) {
         setLocalNotice("Getting your account ready did not finish. Try again.");
         return;
@@ -596,15 +642,41 @@ export function BookingPage() {
     }
   }
 
+  /**
+   * Before the client can start a deposit, make sure the price on screen is
+   * still one the anchor would honour. A refresh never calls the hold
+   * endpoint -- it is a plain `/quote` read -- so it cannot create or extend
+   * a hold as a side effect.
+   */
+  async function ensureFreshQuote(): Promise<QuoteResponse | undefined> {
+    if (!quoteAmount) return undefined;
+    setQuoteBusy(true);
+    const result = await freshQuote(depositQuote, (refresh) => getQuote(quoteAmount, refresh));
+    setQuoteBusy(false);
+    if (!result) {
+      setQuoteError("That price is out of date and we couldn't refresh it. Try again before continuing.");
+      return undefined;
+    }
+    if (result.refreshed) {
+      setDepositQuote(rememberQuote(result.quote));
+      setQuoteError(undefined);
+    }
+    return result.quote;
+  }
+
   async function startLocalCurrency(): Promise<void> {
     if (!hold || !session) return;
     setLocalBusy(true);
     setLocalNotice(undefined);
     setHoldError(undefined);
     try {
+      // A failed refresh blocks the deposit entirely -- no anchor call is
+      // made with a figure the client was told was old.
+      const quote = await ensureFreshQuote();
+      if (!quote) return;
       const authed = await ensureAnchorAuth(session, hold.bookingId);
       if (!authed) return;
-      const result = await openLocalDeposit(hold.bookingId, session);
+      const result = await openLocalDeposit(hold.bookingId, session, quote);
       await applyLocalDepositResponse(session, hold.bookingId, result);
     } catch (error) {
       const message = localDepositErrorMessage(error);
@@ -734,6 +806,20 @@ export function BookingPage() {
                 <TryAmount amount={depositAmount} />
               </strong>
             </div>
+            {depositQuote && (
+              <div className="booking-summary__row quote-equivalent">
+                <span>Indicative equivalent</span>
+                <strong>
+                  {formatFiatAmount(depositQuote.quote.fiat.amount)} {depositQuote.quote.fiat.currency}
+                  {displayedQuoteIsStale(depositQuote) ? " · price is old" : " · indicative"}
+                </strong>
+              </div>
+            )}
+            {quoteError && (
+              <p className="banner banner--alert" role="alert" style={{ marginTop: "var(--space-3)" }}>
+                {quoteError}
+              </p>
+            )}
             {balanceAmount && (
               <div className="booking-summary__row">
                 <span>Balance, due before the session</span>
@@ -809,8 +895,13 @@ export function BookingPage() {
 
               <div className="booking-pay__action">
                 {!localDeposit && (
-                  <button type="button" className="button-primary" onClick={() => void startLocalCurrency()} disabled={localBusy}>
-                    {localBusy ? "Opening the transfer…" : "Get bank details"}
+                  <button
+                    type="button"
+                    className="button-primary"
+                    onClick={() => void startLocalCurrency()}
+                    disabled={localBusy || quoteBusy}
+                  >
+                    {quoteBusy ? "Refreshing the price…" : localBusy ? "Opening the transfer…" : "Get bank details"}
                   </button>
                 )}
                 {localDeposit && (
