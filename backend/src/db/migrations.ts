@@ -47,6 +47,7 @@ const STATEMENTS: readonly string[] = [
     price_amount TEXT NOT NULL,
     deposit_rate_bps INTEGER NOT NULL,
     cancellation_window_hours INTEGER NOT NULL,
+    buffer_minutes INTEGER NOT NULL DEFAULT 0,
     is_approved INTEGER NOT NULL DEFAULT 0,
     verified_session_count INTEGER NOT NULL DEFAULT 0,
     provider_cancellation_count INTEGER NOT NULL DEFAULT 0,
@@ -59,6 +60,14 @@ const STATEMENTS: readonly string[] = [
     withdrawn_at INTEGER,
     created_at INTEGER NOT NULL,
     UNIQUE (provider_profile_id, starts_at)
+  )`,
+  // One-off closures: a closed day is its own row, so the provider's
+  // repeating slot pattern is never rewritten to take a day off.
+  `CREATE TABLE IF NOT EXISTS provider_closed_dates (
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    date TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (provider_profile_id, date)
   )`,
   `CREATE TABLE IF NOT EXISTS bookings (
     id TEXT PRIMARY KEY,
@@ -171,6 +180,13 @@ const STATEMENTS: readonly string[] = [
     user_id TEXT,
     display_name TEXT,
     expires_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS shop_reports (
+    id TEXT PRIMARY KEY,
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    reported_by_wallet TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL
   )`,
 ];
 
@@ -330,5 +346,9 @@ export function runMigrations(sqlite: Database): void {
   // Mark client arrived: the shop marks when a client walks in.
   if (!hasColumn(sqlite, "bookings", "arrived_at")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN arrived_at INTEGER`);
+  // Appointment buffer: minutes kept free after a locked booking before
+  // another slot is offered. Default 0 keeps adjacent slots (existing rows).
+  if (!hasColumn(sqlite, "provider_profiles", "buffer_minutes")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN buffer_minutes INTEGER NOT NULL DEFAULT 0`);
   }
 }

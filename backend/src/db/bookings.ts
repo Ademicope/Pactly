@@ -4,7 +4,7 @@
  * `../chain/event-worker.ts` -- which is what AD-1/AD-3 mean in practice:
  * nothing else may write `escrow_state`.
  */
-import { and, eq, gt, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, gte, gt, lt, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 
 import type { Db, DbOrTx } from "./client.js";
 import {
@@ -75,7 +75,7 @@ export async function insertBooking(db: Db, values: NewBooking): Promise<void> {
  * booking" (the spec's own "Always" rule) is enforced by SQLite itself, in
  * one atomic statement, never by a separate JS-level check-then-insert that
  * a second concurrent caller could interleave with. "Active" means a
- * non-expired hold (`hold_expires_at > now`) or a booking whose
+ * non-expired hold (`hold_expires_at >= now`) or a booking whose
  * `escrow_state` is already non-null (a locked/released/refunded booking
  * never frees its slot merely because its own hold's clock ran out).
  *
@@ -104,7 +104,7 @@ export async function insertBookingHoldIfSlotFree(
       WHERE existing.slot_id = ${values.slotId}
         AND (
           (existing.escrow_state IS NOT NULL AND existing.escrow_state != 'refunded')
-          OR (existing.escrow_state IS NULL AND existing.hold_expires_at > ${now})
+          OR (existing.escrow_state IS NULL AND existing.hold_expires_at >= ${now})
         )
     )
   `);
@@ -131,8 +131,34 @@ export async function getActiveBookingForWalletAndSlot(
         eq(bookings.clientWalletAddress, clientWalletAddress),
         or(
           and(isNotNull(bookings.escrowState), ne(bookings.escrowState, "refunded")),
-          and(isNull(bookings.escrowState), gt(bookings.holdExpiresAt, now)),
+          and(isNull(bookings.escrowState), gte(bookings.holdExpiresAt, now)),
         ),
+      ),
+    )
+    .limit(1);
+  return rows[0];
+}
+
+/** Finds the original, never-deployed hold for one wallet and slot. A hold
+ * is expired only while `escrowState` is null, `escrowContractId` is null,
+ * and `holdExpiresAt` is strictly before `now`. Exactly at the boundary
+ * the hold remains active. */
+export async function getExpiredHoldForWalletAndSlot(
+  db: Db,
+  slotId: string,
+  clientWalletAddress: string,
+  now: number,
+): Promise<BookingRow | undefined> {
+  const rows = await db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.slotId, slotId),
+        eq(bookings.clientWalletAddress, clientWalletAddress),
+        isNull(bookings.escrowState),
+        isNull(bookings.escrowContractId),
+        lt(bookings.holdExpiresAt, now),
       ),
     )
     .limit(1);
@@ -150,7 +176,7 @@ export async function countPendingHoldsForWallet(db: Db, clientWalletAddress: st
   const rows = await db
     .select({ id: bookings.id })
     .from(bookings)
-    .where(and(eq(bookings.clientWalletAddress, clientWalletAddress), isNull(bookings.escrowState), gt(bookings.holdExpiresAt, now)));
+    .where(and(eq(bookings.clientWalletAddress, clientWalletAddress), isNull(bookings.escrowState), gte(bookings.holdExpiresAt, now)));
   return rows.length;
 }
 
@@ -508,14 +534,14 @@ export function listPotentialDoubleSales(db: Db, now: number): PotentialDoubleSa
       AND b.escrow_contract_id IS NOT NULL
       AND b.slot_id IS NOT NULL
       AND b.hold_expires_at IS NOT NULL
-      AND b.hold_expires_at <= ${now}
+      AND b.hold_expires_at < ${now}
       AND EXISTS (
         SELECT 1 FROM bookings other
         WHERE other.slot_id = b.slot_id
           AND other.id != b.id
           AND (
             (other.escrow_state IS NOT NULL AND other.escrow_state != 'refunded')
-            OR (other.escrow_state IS NULL AND other.hold_expires_at > ${now})
+            OR (other.escrow_state IS NULL AND other.hold_expires_at >= ${now})
           )
       )
   `);
@@ -550,7 +576,7 @@ export function listConflictingSlotBookings(db: Db, now: number): ConflictingBoo
       AND b1.escrow_state != 'refunded'
       AND (
         (b2.escrow_state IS NOT NULL AND b2.escrow_state != 'refunded')
-        OR (b2.escrow_state IS NULL AND b2.hold_expires_at > ${now})
+        OR (b2.escrow_state IS NULL AND b2.hold_expires_at >= ${now})
       )
   `);
   return rows.map((row) => ({ slotId: row.slot_id, bookingIdA: row.booking_a, bookingIdB: row.booking_b }));
