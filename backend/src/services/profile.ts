@@ -21,17 +21,13 @@ import {
   listApprovedProviderProfiles,
   listApprovedProviderProfilesForDiscover,
   updateProviderProfileRules,
+  updateProviderProfileText as persistProviderProfileText,
   type ProviderProfileRow,
 } from "../db/providerProfiles.js";
-import {
-  listEarliestFutureSlotsByProvider,
-  listFutureSlots,
-  listOpenFutureSlots,
-  replaceFutureSlots,
-  type AvailabilitySlotRow,
-} from "../db/availabilitySlots.js";
+import { listFutureSlots, replaceFutureSlots, type AvailabilitySlotRow } from "../db/availabilitySlots.js";
 import { getCategoryById, getCategoryBySlug, listCategories, type CategoryRow } from "../db/categories.js";
 import type { Db } from "../db/client.js";
+import { listEarliestOfferedSlotsByProvider, listOfferedSlots } from "./availability.js";
 
 /** Pactly's only supported asset for now (matches `services/booking.ts`'s
  * own `DEPOSIT_ASSET_SYMBOL`). Every amount this module returns is shaped
@@ -148,10 +144,30 @@ export class InvalidAvailabilitySlotsError extends Error {
   }
 }
 
+/** An approved shop's text edit failed validation. */
+export class InvalidProviderProfileError extends Error {
+  readonly details: Record<string, string>;
+  constructor(details: Record<string, string>) {
+    super("One or more profile values are invalid.");
+    this.name = "InvalidProviderProfileError";
+    this.details = details;
+  }
+}
+
+/** A pending or rejected shop cannot edit its live marketplace profile. */
+export class ProviderNotApprovedError extends Error {
+  constructor(message = "Only an approved shop can edit its public profile.") {
+    super(message);
+    this.name = "ProviderNotApprovedError";
+  }
+}
+
 export interface ProviderRulesInput {
   priceAmount: string;
   depositRateBps: number;
   cancellationWindowHours: number;
+  /** Minutes kept free after a locked booking (0-120). Omitted means 0. */
+  bufferMinutes?: number;
 }
 
 const POSITIVE_INTEGER_STRING = /^[1-9]\d*$/;
@@ -159,6 +175,8 @@ const MIN_DEPOSIT_RATE_BPS = 1;
 const MAX_DEPOSIT_RATE_BPS = 10000;
 const MIN_CANCELLATION_WINDOW_HOURS = 0;
 const MAX_CANCELLATION_WINDOW_HOURS = 720;
+const MIN_BUFFER_MINUTES = 0;
+const MAX_BUFFER_MINUTES = 120;
 
 /** The rules form's bounds (the spec's I/O matrix). Returns a field ->
  * message map; empty means valid. Never throws -- the caller decides what
@@ -186,6 +204,16 @@ export function validateProviderRules(input: ProviderRulesInput): Record<string,
     input.cancellationWindowHours > MAX_CANCELLATION_WINDOW_HOURS
   ) {
     details.cancellationWindowHours = `Cancellation window must be a whole number of hours between ${MIN_CANCELLATION_WINDOW_HOURS} and ${MAX_CANCELLATION_WINDOW_HOURS}.`;
+  }
+
+  const bufferMinutes = input.bufferMinutes ?? 0;
+  if (
+    typeof bufferMinutes !== "number" ||
+    !Number.isInteger(bufferMinutes) ||
+    bufferMinutes < MIN_BUFFER_MINUTES ||
+    bufferMinutes > MAX_BUFFER_MINUTES
+  ) {
+    details.bufferMinutes = `Buffer must be a whole number of minutes between ${MIN_BUFFER_MINUTES} and ${MAX_BUFFER_MINUTES}.`;
   }
 
   // Only checked once the two inputs it depends on are themselves valid --
@@ -251,6 +279,10 @@ export interface ProviderProfileView {
   id: string;
   displayName: string;
   title: string;
+  /** The shop's description, editable by an approved provider. */
+  bio: string;
+  /** Language codes/names, decoded from the stored JSON array. */
+  languages: string[];
   category: { id: string; name: string; slug: string };
   location: string;
   sessionFormat: string;
@@ -259,6 +291,7 @@ export interface ProviderProfileView {
   deposit: { amount: string; asset: string };
   depositRateBps: number;
   cancellationWindowHours: number;
+  bufferMinutes: number;
   verifiedSessionCount: number;
   isApproved: boolean;
   /** UTC epoch seconds, ascending. */
@@ -271,12 +304,25 @@ export interface ProviderProfileView {
 export function buildProviderProfileView(
   profile: ProviderProfileRow,
   category: CategoryRow,
-  slots: AvailabilitySlotRow[],
+  slots: Array<Pick<AvailabilitySlotRow, "startsAt"> | number>,
 ): ProviderProfileView {
+  let languages: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(profile.languages);
+    if (Array.isArray(parsed)) {
+      languages = parsed.filter((entry): entry is string => typeof entry === "string");
+    }
+  } catch {
+    // A profile stored before this field existed keeps an empty list rather
+    // than breaking the public read.
+  }
+
   return {
     id: profile.id,
     displayName: profile.displayName,
     title: profile.title,
+    bio: profile.bio,
+    languages,
     category: { id: category.id, name: category.name, slug: category.slug },
     location: profile.location,
     sessionFormat: profile.sessionFormat,
@@ -285,9 +331,10 @@ export function buildProviderProfileView(
     deposit: { amount: computeDepositAmount(profile.priceAmount, profile.depositRateBps), asset: ASSET },
     depositRateBps: profile.depositRateBps,
     cancellationWindowHours: profile.cancellationWindowHours,
+    bufferMinutes: profile.bufferMinutes,
     verifiedSessionCount: profile.verifiedSessionCount,
     isApproved: profile.isApproved,
-    slots: slots.map((slot) => slot.startsAt),
+    slots: slots.map((slot) => (typeof slot === "number" ? slot : slot.startsAt)),
   };
 }
 
@@ -309,10 +356,10 @@ async function loadCategoryOrThrow(db: Db, categoryId: string, notFound: () => E
  * -- so nothing about an unapproved profile ever leaks (the spec's own
  * "Always" rule). Story 3.4: a slot that currently carries an active
  * booking (a non-expired hold, or a locked escrow) is excluded here --
- * `listOpenFutureSlots`, not `listFutureSlots` -- so a client is never shown
+ * `listOfferedSlots`, not `listFutureSlots` -- so a client is never shown
  * a slot they cannot actually hold; this is also how "the slot then shows
  * as taken on the profile" (spec Acceptance Criteria) is satisfied once a
- * lock lands. */
+ * lock lands. Slots inside the post-lock appointment buffer are excluded too. */
 export async function getPublicProviderProfile(
   db: Db,
   id: string,
@@ -323,8 +370,13 @@ export async function getPublicProviderProfile(
     throw new ProviderNotFoundError();
   }
   const category = await loadCategoryOrThrow(db, profile.categoryId, () => new ProviderNotFoundError());
-  const slots = await listOpenFutureSlots(db, profile.id, { now, withinSeconds: PUBLIC_SLOTS_WINDOW_SECONDS });
-  return buildProviderProfileView(profile, category, slots);
+  const offeredStarts = await listOfferedSlots(db, profile.id, {
+    now,
+    withinSeconds: PUBLIC_SLOTS_WINDOW_SECONDS,
+    sessionLengthMinutes: profile.sessionLengthMinutes,
+    bufferMinutes: profile.bufferMinutes,
+  });
+  return buildProviderProfileView(profile, category, offeredStarts);
 }
 
 /** `GET /me/provider`: the caller's own profile, including while
@@ -360,7 +412,12 @@ export async function updateProviderRules(
   if (Object.keys(details).length > 0) {
     throw new InvalidProviderRulesError(details);
   }
-  await updateProviderProfileRules(db, profile.id, input);
+  await updateProviderProfileRules(db, profile.id, {
+    priceAmount: input.priceAmount,
+    depositRateBps: input.depositRateBps,
+    cancellationWindowHours: input.cancellationWindowHours,
+    bufferMinutes: input.bufferMinutes ?? 0,
+  });
   return getOwnProviderProfile(db, walletAddress);
 }
 
@@ -384,6 +441,95 @@ export async function updateProviderAvailability(
   await replaceFutureSlots(db, profile.id, slots, now);
   return getOwnProviderProfile(db, walletAddress, now);
 }
+
+// ---------------------------------------------------------------------------
+// Approved-provider profile edits. The commercial terms (price, deposit
+// rate, category) and the approval flag are not in this input at all: an
+// edit to the shop's copy can never quietly change what a client pays.
+// ---------------------------------------------------------------------------
+
+export interface ProviderProfileTextInput {
+  title: string;
+  bio: string;
+  languages: string[];
+  sessionLengthMinutes: number;
+  /** "How to find the shop" -- free text, no geocoding. */
+  location: string;
+}
+
+const MIN_PROFILE_SESSION_LENGTH_MINUTES = 15;
+const MAX_PROFILE_SESSION_LENGTH_MINUTES = 240;
+
+/** Field-level validation for the approved-provider edit form. Empty object
+ * means valid; the route wraps a non-empty result in
+ * {@link InvalidProviderProfileError}. */
+export function validateProviderProfileText(input: ProviderProfileTextInput): Record<string, string> {
+  const details: Record<string, string> = {};
+  if (typeof input.title !== "string" || input.title.trim() === "") {
+    details.title = "Title is required.";
+  }
+  if (typeof input.bio !== "string" || input.bio.trim() === "") {
+    details.bio = "Description is required.";
+  }
+  if (
+    !Array.isArray(input.languages) ||
+    input.languages.some((language) => typeof language !== "string" || language.trim() === "")
+  ) {
+    details.languages = "Languages must be a list of non-empty names.";
+  }
+  if (
+    typeof input.sessionLengthMinutes !== "number" ||
+    !Number.isInteger(input.sessionLengthMinutes) ||
+    input.sessionLengthMinutes < MIN_PROFILE_SESSION_LENGTH_MINUTES ||
+    input.sessionLengthMinutes > MAX_PROFILE_SESSION_LENGTH_MINUTES
+  ) {
+    details.sessionLengthMinutes = `Session length must be a whole number of minutes between ${MIN_PROFILE_SESSION_LENGTH_MINUTES} and ${MAX_PROFILE_SESSION_LENGTH_MINUTES}.`;
+  }
+  if (typeof input.location !== "string") {
+    details.location = "Location must be text.";
+  }
+  return details;
+}
+
+/**
+ * `PUT /me/provider/profile`: updates only the copy an approved shop owns.
+ * The profile is resolved from the caller's own wallet, so another shop's
+ * wallet cannot reach it (no profile for that wallet -> 404
+ * {@link NotAProviderError}); a pending/rejected shop is refused with
+ * {@link ProviderNotApprovedError}. Price, deposit rate and category are
+ * never read from the input, so they cannot drift on this route.
+ */
+export async function updateProviderProfile(
+  db: Db,
+  walletAddress: string,
+  input: ProviderProfileTextInput,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<ProviderProfileView> {
+  const profile = await getProviderProfileByWallet(db, walletAddress);
+  if (!profile) {
+    throw new NotAProviderError();
+  }
+  if (!profile.isApproved) {
+    throw new ProviderNotApprovedError();
+  }
+  const details = validateProviderProfileText(input);
+  if (Object.keys(details).length > 0) {
+    throw new InvalidProviderProfileError(details);
+  }
+  await persistProviderProfileText(db, profile.id, {
+    title: input.title.trim(),
+    bio: input.bio.trim(),
+    languages: JSON.stringify([...new Set(input.languages.map((language) => language.trim()))]),
+    sessionLengthMinutes: input.sessionLengthMinutes,
+    location: input.location.trim(),
+  });
+  return getOwnProviderProfile(db, walletAddress, now);
+}
+
+/** Aliases with the narrower wording used by the panel and the routes. */
+export const editApprovedProviderProfile = updateProviderProfile;
+export const updateProviderProfileText = updateProviderProfile;
+export const updateProviderDetails = updateProviderProfile;
 
 // ---------------------------------------------------------------------------
 // Story 3.2: the Discover list's card objects and the category counts.
@@ -523,10 +669,15 @@ export async function listDiscoverProviders(
 
   const allCategories = await listCategories(db);
   const categoryById = new Map(allCategories.map((row) => [row.id, row]));
-  const earliestSlotsByProvider = await listEarliestFutureSlotsByProvider(
+  const earliestSlotsByProvider = await listEarliestOfferedSlotsByProvider(
     db,
-    profiles.map((profile) => profile.id),
-    { now, limit: CARD_EARLIEST_SLOTS_LIMIT },
+    profiles.map((profile) => ({
+      id: profile.id,
+      sessionLengthMinutes: profile.sessionLengthMinutes,
+      bufferMinutes: profile.bufferMinutes,
+    })),
+    now,
+    CARD_EARLIEST_SLOTS_LIMIT,
   );
 
   // Availability: a provider's *earliest* future slot is, by definition,

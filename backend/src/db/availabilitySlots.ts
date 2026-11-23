@@ -8,12 +8,13 @@ import { randomUUID } from "node:crypto";
 import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notExists, or, sql } from "drizzle-orm";
 
 import type { Db } from "./client.js";
+import { slotNotOnClosedDate } from "./closedDates.js";
 import { availabilitySlots, bookings } from "./schema.js";
 
 export type AvailabilitySlotRow = typeof availabilitySlots.$inferSelect;
 
 /** Every slot for `providerProfileId` that currently carries an "active"
- * booking (Story 3.4, AD-13): a non-expired hold (`hold_expires_at > now`),
+ * booking (Story 3.4, AD-13): a non-expired hold (`hold_expires_at >= now`),
  * or a booking whose `escrowState` is non-null *and not* `"refunded"`.
  * Review follow-up: a refunded booking must not keep a slot taken forever
  * -- refunding means the deposit came back to the client, so the slot is
@@ -35,7 +36,7 @@ function activeBookingForSlot(now: number) {
       // cleared on a state transition) would read as "active" again via
       // this second clause alone, defeating the whole point of excluding
       // `refunded` above.
-      and(isNull(bookings.escrowState), gt(bookings.holdExpiresAt, now)),
+      and(isNull(bookings.escrowState), gte(bookings.holdExpiresAt, now)),
     ),
   );
 }
@@ -47,7 +48,7 @@ function isBookingActive(booking: Pick<typeof bookings.$inferSelect, "escrowStat
   if (booking.escrowState !== null) {
     return booking.escrowState !== "refunded";
   }
-  return booking.holdExpiresAt !== null && booking.holdExpiresAt > now;
+  return booking.holdExpiresAt !== null && booking.holdExpiresAt >= now;
 }
 
 export interface ListFutureSlotsOptions {
@@ -121,6 +122,9 @@ export async function listEarliestFutureSlotsByProvider(
         inArray(availabilitySlots.providerProfileId, providerProfileIds),
         gt(availabilitySlots.startsAt, now),
         isNull(availabilitySlots.withdrawnAt),
+        // A one-off closed date removes the slot from every client-facing
+        // list without rewriting the provider's repeating slot pattern.
+        slotNotOnClosedDate(),
         // Story 3.4: a held or locked slot is never advertised on a card.
         notExists(db.select({ one: sql`1` }).from(bookings).where(activeBookingForSlot(now))),
       ),
@@ -154,6 +158,7 @@ export async function listOpenFutureSlots(
     eq(availabilitySlots.providerProfileId, providerProfileId),
     gt(availabilitySlots.startsAt, now),
     isNull(availabilitySlots.withdrawnAt),
+    slotNotOnClosedDate(),
     notExists(db.select({ one: sql`1` }).from(bookings).where(activeBookingForSlot(now))),
   ];
   if (options.withinSeconds !== undefined) {
@@ -218,6 +223,7 @@ export async function listOpenSlotsInRange(
         gte(availabilitySlots.startsAt, rangeStart),
         lt(availabilitySlots.startsAt, rangeEnd),
         isNull(availabilitySlots.withdrawnAt),
+        slotNotOnClosedDate(),
         notExists(db.select({ one: sql`1` }).from(bookings).where(activeBookingForSlot(now))),
       ),
     )
