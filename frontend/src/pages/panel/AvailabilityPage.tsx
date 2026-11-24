@@ -13,7 +13,7 @@ import {
   useUpdateProviderRules,
 } from "../../api/hooks";
 import { TryAmount } from "../../components/TryAmount";
-import { tryToUsdcSmallestUnit, usdcToTry } from "../../lib/money";
+import { currencyToUsdcSmallestUnit, usdcToCurrency } from "../../lib/money";
 import { getSession, signOut, type Session } from "../../wallet";
 
 const GRID_DAYS = 14;
@@ -109,11 +109,7 @@ export function AvailabilityPage() {
   const profileQuery = useOwnProviderProfile(session);
   const updateRules = useUpdateProviderRules(session);
   const updateAvailability = useUpdateProviderAvailability(session);
-  const updateProfile = useUpdateProviderProfile(session);
-  const closedDatesQuery = useClosedDates(session);
-  const closeDateMutation = useCloseDate(session);
-  const reopenDateMutation = useReopenDate(session);
-  const { rate } = useTryRate();
+  const { rate, currency, decimals, isFallback } = useTryRate();
 
   // The price is stored in USDC smallest units (AD-7) but typed in TRY.
   // Until the provider actually edits the field, what it shows is *derived*
@@ -167,8 +163,14 @@ export function AvailabilityPage() {
   }
 
   const storedPrice = profileQuery.data?.price.amount;
-  const priceText = priceEdited ? priceInput : storedPrice !== undefined ? usdcToTry(storedPrice, rate) : "";
-  const priceSmallestUnit = priceEdited ? tryToUsdcSmallestUnit(priceInput, rate) : storedPrice;
+  const priceText = priceEdited
+    ? priceInput
+    : storedPrice !== undefined && !isFallback
+      ? usdcToCurrency(storedPrice, rate, decimals)
+      : "";
+  const priceSmallestUnit = priceEdited
+    ? currencyToUsdcSmallestUnit(priceInput, rate, decimals)
+    : storedPrice;
   // Basis points on the wire (`depositRateBps`), a percentage on screen.
   const depositRatePercent = Number(depositRatePercentInput);
   const depositRateBps = Number.isFinite(depositRatePercent) ? Math.round(depositRatePercent * 100) : Number.NaN;
@@ -405,7 +407,7 @@ export function AvailabilityPage() {
         )}
         <form onSubmit={handleSaveRules}>
           <div className="field">
-            <label htmlFor="price">Session price (TRY)</label>
+            <label htmlFor="price">Session price ({currency || "Currency unavailable"})</label>
             <input
               id="price"
               inputMode="decimal"
@@ -416,7 +418,7 @@ export function AvailabilityPage() {
               }}
             />
             {priceEdited && priceInput.trim() !== "" && !priceSmallestUnit && (
-              <span className="field__error">Enter an amount in lira, up to two decimals.</span>
+              <span className="field__error">Enter an amount, using up to {decimals} decimals.</span>
             )}
             {rulesErrorDetails?.priceAmount && <span className="field__error">{rulesErrorDetails.priceAmount}</span>}
           </div>

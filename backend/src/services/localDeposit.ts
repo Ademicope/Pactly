@@ -117,21 +117,24 @@ function parseExpiresAt(isoOrUndefined: string | undefined, nowMs: number): numb
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : Math.floor(nowMs / 1000) + HOLD_DURATION_SECONDS;
 }
 
-function fiatToMinor(decimal: string): bigint | undefined {
+function fiatToMinor(decimal: string, decimals: number): bigint | undefined {
   if (!/^\d+(\.\d+)?$/.test(decimal.trim())) return undefined;
   const [whole = "0", fraction = ""] = decimal.trim().split(".");
-  return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
+  if (fraction.length > decimals) return undefined;
+  return BigInt(whole) * (10n ** BigInt(decimals)) + BigInt(fraction.padEnd(decimals, "0"));
 }
 
-/** SEP-6 deposit amount on this rail is TRY at 2 decimal places. */
-function toTwoDecimalPlaces(decimal: string): string {
-  const minor = fiatToMinor(decimal);
+function toConfiguredDecimalPlaces(decimal: string, decimals: number): string {
+  const minor = fiatToMinor(decimal, decimals);
   if (minor === undefined) {
     throw new AnchorQuoteUnavailableError(`Could not format the local-currency amount "${decimal}"`);
   }
-  const whole = minor / 100n;
-  const fraction = (minor % 100n).toString().padStart(2, "0");
-  return `${whole}.${fraction}`;
+  const divisor = 10n ** BigInt(decimals);
+  const whole = minor / divisor;
+  const fraction = decimals > 0
+    ? `.${(minor % divisor).toString().padStart(decimals, "0")}`
+    : "";
+  return `${whole}${fraction}`;
 }
 
 function defaultHorizonUrl(): string {
@@ -328,19 +331,21 @@ async function enforceLimits(
   }
   let fiatAmount: string;
   let currency: string;
+  let decimals: number;
   try {
     const quote = await fetchIndicativePrice({ amount: depositAmount }, { fetchImpl, now });
     fiatAmount = quote.fiat.amount;
     currency = quote.fiat.currency;
+    decimals = quote.fiat.decimals;
   } catch (error) {
     if (error instanceof AnchorQuoteUnavailableError) {
       return;
     }
     throw error;
   }
-  const amountMinor = fiatToMinor(fiatAmount);
-  const minMinor = limits.minAmount ? fiatToMinor(limits.minAmount) : undefined;
-  const maxMinor = limits.maxAmount ? fiatToMinor(limits.maxAmount) : undefined;
+  const amountMinor = fiatToMinor(fiatAmount, decimals);
+  const minMinor = limits.minAmount ? fiatToMinor(limits.minAmount, decimals) : undefined;
+  const maxMinor = limits.maxAmount ? fiatToMinor(limits.maxAmount, decimals) : undefined;
   if (amountMinor === undefined) return;
   if ((minMinor !== undefined && amountMinor < minMinor) || (maxMinor !== undefined && amountMinor > maxMinor)) {
     throw new AmountOutOfRangeError(limits.minAmount ?? "0", limits.maxAmount ?? "—", currency);
@@ -375,15 +380,10 @@ async function openAgainstAnchor(
   const nowMs = deps.now?.() ?? Date.now();
   const token = await requireFreshAnchorJwt(db, walletAddress, authDeps(deps));
   await ensureSep12Approved({ token, account: walletAddress }, { fetchImpl: deps.fetchImpl });
-  // A client-confirmed quote wins: it is the figure they actually approved
-  // on screen. Without one, fetch the anchor's current price as before.
-  const tryAmount =
-    confirmedTryAmount ??
-    toTwoDecimalPlaces(
-      (await fetchIndicativePrice({ amount: booking.depositAmount }, { fetchImpl: deps.fetchImpl, now: deps.now })).fiat.amount,
-    );
+  const quote = await fetchIndicativePrice({ amount: booking.depositAmount }, { fetchImpl: deps.fetchImpl });
+  const localAmount = toConfiguredDecimalPlaces(quote.fiat.amount, quote.fiat.decimals);
   const opened = await openSep6Deposit(
-    { token, account: walletAddress, amount: tryAmount, memo: booking.id.slice(0, 28) },
+    { token, account: walletAddress, amount: localAmount, memo: booking.id.slice(0, 28) },
     { fetchImpl: deps.fetchImpl },
   );
   await persistOpened(db, booking.id, opened, nowMs);
@@ -547,7 +547,8 @@ export async function simulateLocalDeposit(
     throw new BookingEscrowStateError("No local-currency transfer is in progress for this booking.");
   }
   const rawAmount = booking.anchorDepositAmountIn ?? smallestUnitToStellarAmount(booking.depositAmount);
-  const amount = toTwoDecimalPlaces(rawAmount);
+  const quote = await fetchIndicativePrice({ amount: booking.depositAmount }, { fetchImpl: deps.fetchImpl });
+  const amount = toConfiguredDecimalPlaces(rawAmount, quote.fiat.decimals);
   await simulateSep6BankTransfer(booking.anchorDepositId, amount, { fetchImpl: deps.fetchImpl });
   return pollLocalDeposit(db, bookingId, walletAddress, deps);
 }

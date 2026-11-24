@@ -2,6 +2,8 @@ import { Link } from "react-router";
 import { ArrowRightIcon, CalendarBlankIcon, CheckCircleIcon, LockKeyIcon, ShieldCheckIcon, StorefrontIcon } from "@phosphor-icons/react";
 
 import { providerPhotoSrc } from "../../lib/providerPhotos";
+import { useTryRate } from "../../api/hooks";
+import { formatCurrency } from "../../lib/money";
 
 /** The four seeded categories (`backend/src/seed/demoData.ts`), named here
  * instead of fetched: the landing page renders before any API call and
@@ -23,6 +25,8 @@ const CATEGORIES: Array<{ slug: string; name: string; providerId: string }> = [
 export function LandingPage() {
   const storyPhoto = providerPhotoSrc("demo-marmara-hair-clinic");
   const heroPhoto = providerPhotoSrc("demo-atelier-lale");
+  const { rate, currency, decimals, isFallback } = useTryRate();
+  const demoDeposit = isFallback ? "Currency unavailable" : formatCurrency("2400000000", rate, currency, decimals);
 
   return (
     <div className="landing">
@@ -69,7 +73,7 @@ export function LandingPage() {
               <p className="landing__mock-name">Marmara Hair Clinic</p>
               <p className="landing__mock-meta">Consultation · Istanbul · Fri 14:00</p>
               <div className="deposit-pill">
-                <span className="deposit-pill__amount tabular-nums">2,400.00 TRY</span>{" "}
+                <span className="deposit-pill__amount tabular-nums">{demoDeposit}</span>{" "}
                 <span className="deposit-pill__caption">deposit · free cancellation until Thu 14:00</span>
               </div>
               <div className="landing__mock-status">
@@ -106,7 +110,7 @@ export function LandingPage() {
               </div>
               <h3>Lock a deposit in escrow</h3>
               <p>
-                Pay the deposit by bank transfer in TRY. Trustless Work holds it in escrow — not Pactly, not the
+                Pay the deposit by bank transfer in {isFallback ? "the anchor currency" : currency}. Trustless Work holds it in escrow — not Pactly, not the
                 provider.
               </p>
             </div>
@@ -216,7 +220,7 @@ export function LandingPage() {
                 Trustless Work escrow
               </a>
             </span>
-            <span className="landing__badge">Bank transfer · TRY sandbox</span>
+            <span className="landing__badge">Bank transfer · {isFallback ? "Anchor currency sandbox" : `${currency} sandbox`}</span>
           </div>
         </div>
       </section>

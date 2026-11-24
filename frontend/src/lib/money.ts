@@ -18,11 +18,6 @@
  * it identically rather than drift into a different wording. */
 export const LOCAL_CURRENCY_UNAVAILABLE_NOTE = "Pay the balance through Pactly before the session, or settle it in person with the provider.";
 
-/** TRY per 1 USDC, used only when `GET /api/rate` is unreachable (or has
- * not answered yet). Amounts shown at this rate carry a leading "≈" -- see
- * `components/TryAmount.tsx`. */
-export const FALLBACK_TRY_PER_USDC = "48.54";
-
 /** USDC on Stellar: 7 decimal places, matching `backend/src/services/
  * profile.ts`'s `computeDepositAmount`. */
 const SMALLEST_UNIT_DECIMALS = 7;
@@ -93,14 +88,9 @@ export function smallestUnitToDecimalInput(amount: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// TRY display. The rate (`GET /api/rate`'s `rate`, TRY per 1 USDC) is a
-// decimal string such as "48.5410"; it is parsed once into an integer
-// numerator plus a power-of-ten scale so every conversion below stays in
-// BigInt -- no float ever touches the USDC side.
+// Anchor fiat display. The rate is local-currency units per 1 USDC.
+// Currency code and precision come from the anchor configuration.
 // ---------------------------------------------------------------------------
-
-/** Kuruş per lira: TRY is shown and typed to 2 decimals. */
-const TRY_DECIMALS = 2;
 
 interface ScaledRate {
   /** `rate * 10^decimals`, as an integer. */
@@ -137,32 +127,45 @@ function groupThousands(digits: string): string {
  * `"0.00"` rather than throwing -- a display helper must never take a
  * screen down.
  */
-export function usdcToTry(amountSmallestUnit: string, rate: string): string {
+export function usdcToCurrency(amountSmallestUnit: string, rate: string, decimals: number): string {
   const parsed = parseRate(rate);
   if (!parsed) {
-    return "0.00";
+    return `0${decimals > 0 ? `.${"0".repeat(decimals)}` : ""}`;
   }
   const value = BigInt(amountSmallestUnit);
   const negative = value < 0n;
   const magnitude = negative ? -value : value;
-  // kuruş = amount * rate * 10^2 / 10^7, with rate = numerator / 10^decimals.
-  const kurus = divideRounded(
-    magnitude * parsed.numerator * 10n ** BigInt(TRY_DECIMALS),
+  const minorUnits = divideRounded(
+    magnitude * parsed.numerator * 10n ** BigInt(decimals),
     10n ** BigInt(SMALLEST_UNIT_DECIMALS + parsed.decimals),
   );
-  const lira = kurus / 100n;
-  const fraction = (kurus % 100n).toString().padStart(TRY_DECIMALS, "0");
-  return `${negative ? "-" : ""}${lira}.${fraction}`;
+  const divisor = 10n ** BigInt(decimals);
+  const whole = minorUnits / divisor;
+  const fraction = decimals > 0
+    ? `.${(minorUnits % divisor).toString().padStart(decimals, "0")}`
+    : "";
+  return `${negative ? "-" : ""}${whole}${fraction}`;
+}
+
+/** Backward-compatible wrapper; new UI should use `usdcToCurrency`. */
+export function usdcToTry(amountSmallestUnit: string, rate: string): string {
+  return usdcToCurrency(amountSmallestUnit, rate, 2);
 }
 
 /** `"2,912.46 TRY"` -- English digit grouping, ISO code rather than a
  * symbol (the app's copy rule). The one formatter every user-visible
  * amount goes through (via `<TryAmount>`). */
-export function formatTry(amountSmallestUnit: string, rate: string): string {
-  const decimal = usdcToTry(amountSmallestUnit, rate);
+export function formatCurrency(amountSmallestUnit: string, rate: string, currency: string, decimals: number): string {
+  const decimal = usdcToCurrency(amountSmallestUnit, rate, decimals);
   const negative = decimal.startsWith("-");
-  const [whole = "0", fraction = "00"] = (negative ? decimal.slice(1) : decimal).split(".");
-  return `${negative ? "-" : ""}${groupThousands(whole)}.${fraction} TRY`;
+  const [whole = "0", fraction] = (negative ? decimal.slice(1) : decimal).split(".");
+  const fractionText = fraction === undefined ? "" : `.${fraction}`;
+  return `${negative ? "-" : ""}${groupThousands(whole)}${fractionText} ${currency}`;
+}
+
+/** Backward-compatible wrapper; new UI should use `formatCurrency`. */
+export function formatTry(amountSmallestUnit: string, rate: string): string {
+  return formatCurrency(amountSmallestUnit, rate, "", 2).trim();
 }
 
 /**
@@ -186,8 +189,8 @@ export function formatTry(amountSmallestUnit: string, rate: string): string {
  * ("1,5" / "12.50"). Returns `undefined` for anything that isn't a money
  * amount.
  */
-export function normaliseTryInput(input: string): string | undefined {
-  let text = input.replace(/[₺\s]|TRY|TL/gi, "");
+export function normaliseCurrencyInput(input: string, decimals: number): string | undefined {
+  let text = input.replace(/[₺\s]|[A-Z]{3}/gi, "");
   if (!/^\d[\d.,]*$/.test(text)) {
     return undefined;
   }
@@ -210,28 +213,35 @@ export function normaliseTryInput(input: string): string | undefined {
     fraction = text.slice(at + 1);
   }
   whole = whole.replace(/[.,]/g, "");
-  if (!/^\d+$/.test(whole) || !/^\d{0,2}$/.test(fraction)) {
+  if (!/^\d+$/.test(whole) || fraction.length > decimals || !/^\d*$/.test(fraction)) {
     return undefined;
   }
   text = fraction ? `${whole}.${fraction}` : whole;
   return text;
 }
 
-export function tryToUsdcSmallestUnit(tryInput: string, rate: string): string | undefined {
+export function currencyToUsdcSmallestUnit(currencyInput: string, rate: string, decimals: number): string | undefined {
   const parsed = parseRate(rate);
   if (!parsed) {
     return undefined;
   }
-  const normalised = normaliseTryInput(tryInput);
+  const normalised = normaliseCurrencyInput(currencyInput, decimals);
   if (normalised === undefined) {
     return undefined;
   }
   const [whole = "0", fraction = ""] = normalised.split(".");
-  const kurus = BigInt(`${whole}${fraction.padEnd(TRY_DECIMALS, "0")}`);
-  // smallest = kuruş * 10^7 * 10^decimals / (10^2 * numerator)
+  const minor = BigInt(`${whole}${fraction.padEnd(decimals, "0")}`);
   const smallest = divideRounded(
-    kurus * 10n ** BigInt(SMALLEST_UNIT_DECIMALS + parsed.decimals),
-    10n ** BigInt(TRY_DECIMALS) * parsed.numerator,
+    minor * 10n ** BigInt(SMALLEST_UNIT_DECIMALS + parsed.decimals),
+    10n ** BigInt(decimals) * parsed.numerator,
   );
   return smallest.toString();
+}
+
+export function normaliseTryInput(input: string): string | undefined {
+  return normaliseCurrencyInput(input, 2);
+}
+
+export function tryToUsdcSmallestUnit(tryInput: string, rate: string): string | undefined {
+  return currencyToUsdcSmallestUnit(tryInput, rate, 2);
 }

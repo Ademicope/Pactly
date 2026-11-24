@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { useTryRate } from "../api/hooks";
-import { tryToUsdcSmallestUnit, usdcToTry } from "../lib/money";
+import { currencyToUsdcSmallestUnit, usdcToCurrency } from "../lib/money";
 import { formatSessionFormat } from "../lib/sessionFormat";
 import type { DiscoverAvailability } from "../api/types";
 
@@ -13,8 +13,8 @@ import type { DiscoverAvailability } from "../api/types";
 const NON_NEGATIVE_INTEGER_STRING = /^(0|[1-9]\d*)$/;
 
 /** The URL carries the smallest-unit string; the field shows lira. */
-function toPriceInputText(amount: string | undefined, rate: string): string {
-  return amount !== undefined && NON_NEGATIVE_INTEGER_STRING.test(amount) ? usdcToTry(amount, rate) : "";
+function toPriceInputText(amount: string | undefined, rate: string, decimals: number): string {
+  return amount !== undefined && NON_NEGATIVE_INTEGER_STRING.test(amount) ? usdcToCurrency(amount, rate, decimals) : "";
 }
 
 /** The complete universe of `sessionFormat` values the demo seed and the
@@ -50,27 +50,28 @@ export interface FilterFieldsProps {
  * re-derived from the URL, so it may come back a kuruş off what was typed
  * (two roundings at the rate) -- harmless for a filter bound. */
 function PriceRangeField({ minPrice, maxPrice, onPriceRangeChange }: Pick<FilterFieldsProps, "minPrice" | "maxPrice" | "onPriceRangeChange">) {
-  const { rate } = useTryRate();
-  const [minText, setMinText] = useState(toPriceInputText(minPrice, rate));
-  const [maxText, setMaxText] = useState(toPriceInputText(maxPrice, rate));
+  const { rate, currency, decimals, isFallback } = useTryRate();
+  const [minText, setMinText] = useState(isFallback ? "" : toPriceInputText(minPrice, rate, decimals));
+  const [maxText, setMaxText] = useState(isFallback ? "" : toPriceInputText(maxPrice, rate, decimals));
 
   useEffect(() => {
-    setMinText(toPriceInputText(minPrice, rate));
-  }, [minPrice, rate]);
+    setMinText(isFallback ? "" : toPriceInputText(minPrice, rate, decimals));
+  }, [minPrice, rate, decimals, isFallback]);
   useEffect(() => {
-    setMaxText(toPriceInputText(maxPrice, rate));
-  }, [maxPrice, rate]);
+    setMaxText(isFallback ? "" : toPriceInputText(maxPrice, rate, decimals));
+  }, [maxPrice, rate, decimals, isFallback]);
 
   function commit() {
-    const min = minText.trim() === "" ? undefined : tryToUsdcSmallestUnit(minText, rate);
-    const max = maxText.trim() === "" ? undefined : tryToUsdcSmallestUnit(maxText, rate);
+    if (isFallback) return;
+    const min = minText.trim() === "" ? undefined : currencyToUsdcSmallestUnit(minText, rate, decimals);
+    const max = maxText.trim() === "" ? undefined : currencyToUsdcSmallestUnit(maxText, rate, decimals);
     onPriceRangeChange(min, max);
   }
 
   return (
     <div className="filter-field__price-range">
       <label className="filter-field__price-input">
-        <span>Min (TRY)</span>
+        <span>Min ({currency || "Currency unavailable"})</span>
         <input
           inputMode="decimal"
           value={minText}
@@ -82,7 +83,7 @@ function PriceRangeField({ minPrice, maxPrice, onPriceRangeChange }: Pick<Filter
         />
       </label>
       <label className="filter-field__price-input">
-        <span>Max (TRY)</span>
+        <span>Max ({currency || "Currency unavailable"})</span>
         <input
           inputMode="decimal"
           value={maxText}
