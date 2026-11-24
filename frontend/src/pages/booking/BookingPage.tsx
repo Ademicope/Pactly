@@ -26,6 +26,7 @@ import { LockButton } from "../../components/LockButton";
 import { ProviderHeader } from "../../components/ProviderHeader";
 import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
+import { formatMoney } from "../../lib/money";
 import { formatFiatAmount } from "../../lib/money";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
@@ -130,6 +131,8 @@ export function BookingPage() {
   const [depositQuote, setDepositQuote] = useState<DisplayedQuote | undefined>();
   const [quoteBusy, setQuoteBusy] = useState(false);
   const [quoteError, setQuoteError] = useState<string | undefined>();
+  const flowFatalErrorRef = useRef<HTMLParagraphElement | null>(null);
+  const quoteErrorRef = useRef<HTMLParagraphElement | null>(null);
 
   // Review follow-up: the flow's own "engine" state (which contractId is in
   // play, whether a deploy has actually been submitted) lives in a ref, not
@@ -147,6 +150,13 @@ export function BookingPage() {
 
   const resumeAttemptedRef = useRef(false);
   const formatTryAmount = useFormatTry();
+
+  useEffect(() => {
+    if (flowFatalError) flowFatalErrorRef.current?.focus();
+  }, [flowFatalError]);
+  useEffect(() => {
+    if (quoteError) quoteErrorRef.current?.focus();
+  }, [quoteError]);
 
   const isLocked = phase === "locked";
   // Polled from the moment a hold exists, not only once the lock flow is
@@ -407,6 +417,18 @@ export function BookingPage() {
       if (error.code === "HOLD_EXPIRED") {
         return { fatal: true, message: "This hold has expired. The slot may already be taken again." };
       }
+      if (error.code === "SHORT_DEPOSIT") {
+        const details = error.details as { receivedAmount?: string; requiredAmount?: string; asset?: string } | undefined;
+        if (details?.receivedAmount && details?.requiredAmount && details?.asset) {
+          const received = formatMoney(details.receivedAmount, details.asset);
+          const required = formatMoney(details.requiredAmount, details.asset);
+          return {
+            fatal: true,
+            message: `The anchor transfer credited ${received} but this booking requires ${required}. The hold remains — you can retry once you've topped up.`,
+          };
+        }
+        return { fatal: true, message: error.message || "The anchor transfer did not credit enough." };
+      }
       return { fatal: true, message: error.message || "Connection dropped. Your deposit is untouched." };
     }
     return { fatal: true, message: "Connection dropped. Your deposit is untouched." };
@@ -422,6 +444,13 @@ export function BookingPage() {
     if (error instanceof ApiError && error.code === "HOLD_EXPIRED") {
       setHold(undefined);
       engineRef.current = {};
+      setPhase("idle");
+      return;
+    }
+    if (error instanceof ApiError && error.code === "SHORT_DEPOSIT") {
+      // Short deposit keeps the hold and stays at idle so the client
+      // can see the error and the local-currency panel. They can retry
+      // Lock once they've topped up the transfer.
       setPhase("idle");
       return;
     }
@@ -823,7 +852,7 @@ export function BookingPage() {
               </div>
             )}
             {quoteError && (
-              <p className="banner banner--alert" role="alert" style={{ marginTop: "var(--space-3)" }}>
+              <p ref={quoteErrorRef} className="banner banner--alert" role="alert" tabIndex={-1} style={{ marginTop: "var(--space-3)" }}>
                 {quoteError}
               </p>
             )}
@@ -897,7 +926,7 @@ export function BookingPage() {
                   onChange={(event) => setClientEmail(event.target.value)}
                 />
               </div>
-              <button type="button" className="button-primary" onClick={ensureSessionAndHold} disabled={connecting || holdMutation.isPending}>
+              <button type="button" className="button-primary" onClick={ensureSessionAndHold} disabled={connecting || holdMutation.isPending} aria-label={session ? "Hold this slot" : "Sign in and hold this slot"}>
                 {connecting ? "Signing you in…" : holdMutation.isPending ? "Holding your slot…" : session ? "Hold this slot" : "Sign in and hold this slot"}
               </button>
             </div>
@@ -918,6 +947,7 @@ export function BookingPage() {
                     className="button-primary"
                     onClick={() => void startLocalCurrency()}
                     disabled={localBusy || quoteBusy}
+                    aria-label="Get bank details"
                   >
                     {quoteBusy ? "Refreshing the price…" : localBusy ? "Opening the transfer…" : "Get bank details"}
                   </button>
@@ -928,14 +958,14 @@ export function BookingPage() {
                     amount={depositAmount}
                     busy={localBusy}
                     onSimulate={() => void handleSimulate()}
-                    onRetry={() => void startLocalCurrency()}
+                    onRetry={() => void retryFailedDeposit()}
                   />
                 )}
                 {localReceived && (
                   <>
                     <p className="booking-step">Step 3 · Lock the deposit</p>
                     {phase === "deploy-failed" ? (
-                      <button type="button" className="button-primary" onClick={tryAgainAfterFailedDeploy}>
+                      <button type="button" className="button-primary" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
                         Try again
                       </button>
                     ) : (
@@ -968,7 +998,7 @@ export function BookingPage() {
           {showLock && !isLocked && (
             <>
               {phase === "deploy-failed" ? (
-                <button type="button" className="button-escrow" onClick={tryAgainAfterFailedDeploy}>
+                <button type="button" className="button-escrow" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
                   Try again
                 </button>
               ) : (
@@ -990,7 +1020,7 @@ export function BookingPage() {
                 </p>
               )}
               {flowFatalError && (
-                <p className="escrow-lane__notice escrow-lane__notice--alert" role="alert">
+                <p ref={flowFatalErrorRef} className="escrow-lane__notice escrow-lane__notice--alert" role="alert" tabIndex={-1}>
                   {flowFatalError}
                 </p>
               )}
