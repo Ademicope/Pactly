@@ -2480,3 +2480,38 @@ button {
   font-size: var(--text-12);
   color: var(--color-muted);
 }
+
+/* Escrow confirmation -- the step before signing: the escrow id the client
+ * is about to fund, copyable. Stacks full-width so it holds at any size. */
+.escrow-confirmation {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.escrow-confirmation__title {
+  margin: 0;
+  font-size: var(--text-13);
+  font-weight: 500;
+}
+
+.escrow-confirmation__text {
+  margin: 0;
+  font-size: var(--text-13);
+}
+
+.escrow-confirmation__id {
+  display: block;
+  padding: var(--space-2);
+  border: 1px solid currentColor;
+  font-size: var(--text-13);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.escrow-confirmation__copy,
+.escrow-confirmation__cancel {
+  color: var(--color-escrow-text);
+  border-color: var(--color-escrow-line);
+}

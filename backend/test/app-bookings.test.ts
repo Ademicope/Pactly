@@ -302,8 +302,10 @@ test("POST /bookings/:id/lock gives 503 ESCROW_UNAVAILABLE when the owner calls 
     const headers = { ...(await authHeader(clientWalletAddress)), "content-type": "application/json" };
     const response = await app.request(`/bookings/${hold.bookingId}/lock`, { method: "POST", headers });
     assert.equal(response.status, 503);
-    const body = (await response.json()) as { code: string };
+    const body = (await response.json()) as { code: string; contractId?: string };
     assert.equal(body.code, "ESCROW_UNAVAILABLE");
+    assert.equal(body.contractId, undefined, "no escrow id is shown while the operator is unconfigured");
+    assert.equal((await getBookingById(result.db, hold.bookingId))?.escrowContractId, null);
   } finally {
     closeDatabase(result);
   }

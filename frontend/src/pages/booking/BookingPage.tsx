@@ -21,13 +21,15 @@ import {
 import { ApiError } from "../../api/client";
 import type { HoldSlotResponse, LocalDepositView, QuoteResponse } from "../../api/types";
 import { DepositPill } from "../../components/DepositPill";
+import { EscrowConfirmation } from "../../components/EscrowConfirmation";
 import { EscrowLane } from "../../components/EscrowLane";
 import { LocalCurrencyPanel, localDepositErrorMessage } from "../../components/LocalCurrencyPanel";
 import { LockButton } from "../../components/LockButton";
 import { ProviderHeader } from "../../components/ProviderHeader";
 import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
-import { WalletAddressConfirm } from "../../components/WalletAddressConfirm";
+import { ESCROW_UNAVAILABLE_CODE } from "../../lib/escrowConfirmation";
+import { formatFiatAmount } from "../../lib/money";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
 import { displayedQuoteIsStale, freshQuote, rememberQuote, type DisplayedQuote } from "../../lib/quoteFreshness";
@@ -50,6 +52,7 @@ import {
 type DisplayPhase =
   | "idle"
   | "building-deploy"
+  | "confirming-escrow"
   | "awaiting-deploy-signature"
   | "submitting-deploy"
   | "deploy-failed"
@@ -64,6 +67,13 @@ type DisplayPhase =
 interface PendingSignature {
   xdr: string;
   kind: "deploy" | "fund";
+}
+
+/** The escrow the client is asked to confirm before anything is signed.
+ * `unsignedXdr` is absent when the deploy was already submitted earlier. */
+interface EscrowConfirmationState {
+  contractId: string;
+  unsignedXdr?: string;
 }
 
 interface FlowEngineState {
@@ -118,6 +128,8 @@ export function BookingPage() {
   const [pendingSignature, setPendingSignature] = useState<PendingSignature | undefined>();
   const [flowNotice, setFlowNotice] = useState<string | undefined>();
   const [flowFatalError, setFlowFatalError] = useState<string | undefined>();
+  const [escrowConfirmation, setEscrowConfirmation] = useState<EscrowConfirmationState | undefined>();
+  const [escrowUnavailable, setEscrowUnavailable] = useState(false);
   const [needsSignIn, setNeedsSignIn] = useState(false);
   // 2026-09 pivot: the anchor bank transfer is the only way to pay the
   // deposit -- there is no payment-method choice any more, so the local
@@ -502,6 +514,9 @@ export function BookingPage() {
       return;
     }
     const described = describeError(error);
+    if (error instanceof ApiError && error.code === ESCROW_UNAVAILABLE_CODE) {
+      setEscrowUnavailable(true);
+    }
     setFlowFatalError(described.message);
     if (error instanceof ApiError && error.code === "HOLD_EXPIRED") {
       setHold(undefined);
@@ -551,66 +566,20 @@ export function BookingPage() {
     inFlightRef.current = true;
     setFlowNotice(undefined);
     setFlowFatalError(undefined);
+    setEscrowUnavailable(false);
     try {
       if (!engineRef.current.deploySubmittedAtMs) {
         setPhase("building-deploy");
-        // Issue #13: lock moves the deposit, so it asks for a fresh passkey
-        // assertion even while this session is valid. A cancelled prompt
-        // returns here -- no XDR is built, the booking is untouched.
-        let assertionToken: string;
-        try {
-          assertionToken = await assertMoneyAction(session);
-        } catch (error) {
-          if (error instanceof SignInCancelledError) {
-            setPhase("idle");
-            setFlowNotice(
-              `You didn't sign. Nothing changed -- the slot is still yours for ${formatCountdown(holdSecondsLeft)}.`,
-            );
-            return;
-          }
-          throw error;
-        }
-        const lockResult = await lockDeposit(hold.bookingId, session, options.rebuild ?? false, assertionToken);
-        if (lockResult.deployed) {
-          engineRef.current.contractId = lockResult.contractId;
-          // A deploy was already confirmed submitted in an earlier session
-          // (e.g. a reload) -- there is no local submission timestamp to
-          // reuse, so treat "now" as the start of the fund-retry window.
-          engineRef.current.deploySubmittedAtMs = Date.now();
-        } else {
-          engineRef.current.contractId = lockResult.contractId;
-          setPendingSignature({ xdr: lockResult.unsignedXdr, kind: "deploy" });
-          setPhase("awaiting-deploy-signature");
-          let signedXdr: string;
-          try {
-            signedXdr = await signXdr(lockResult.unsignedXdr, session.walletAddress);
-          } catch {
-            setPendingSignature(undefined);
-            setPhase("idle");
-            setFlowNotice(`That didn't go through. The slot is still yours for ${formatCountdown(holdSecondsLeft)}.`);
-            return;
-          }
-          setPhase("submitting-deploy");
-          try {
-            await submitSignedTransaction(hold.bookingId, signedXdr, session);
-          } catch (error) {
-            if (error instanceof ApiError && error.status === 401) {
-              handleUnauthorized();
-              return;
-            }
-            setPendingSignature(undefined);
-            setPhase("deploy-failed");
-            setFlowFatalError(
-              error instanceof ApiError && error.message
-                ? error.message
-                : "Connection dropped. Your deposit is untouched.",
-            );
-            return;
-          }
-          engineRef.current.deploySubmittedAtMs = Date.now();
-          setPendingSignature(undefined);
-          refreshBookingFacts();
-        }
+        const lockResult = await lockDeposit(hold.bookingId, session, options.rebuild ?? false);
+        engineRef.current.contractId = lockResult.contractId;
+        // Nothing is signed until the client has seen which escrow it is.
+        setEscrowConfirmation(
+          lockResult.deployed
+            ? { contractId: lockResult.contractId }
+            : { contractId: lockResult.contractId, unsignedXdr: lockResult.unsignedXdr },
+        );
+        setPhase("confirming-escrow");
+        return;
       }
 
       await runFundStep();
@@ -619,6 +588,68 @@ export function BookingPage() {
     } finally {
       inFlightRef.current = false;
     }
+  }
+
+  /** The client confirmed the escrow shown: sign and submit its deploy (or,
+   * when the deploy was already submitted earlier, go straight to funding). */
+  async function confirmEscrow(): Promise<void> {
+    const pending = escrowConfirmation;
+    if (!pending || !hold || !session) return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setEscrowConfirmation(undefined);
+    try {
+      if (!pending.unsignedXdr) {
+        // A deploy was already confirmed submitted in an earlier session
+        // (e.g. a reload) -- there is no local submission timestamp to
+        // reuse, so treat "now" as the start of the fund-retry window.
+        engineRef.current.deploySubmittedAtMs = Date.now();
+      } else {
+        setPendingSignature({ xdr: pending.unsignedXdr, kind: "deploy" });
+        setPhase("awaiting-deploy-signature");
+        let signedXdr: string;
+        try {
+          signedXdr = await signXdr(pending.unsignedXdr, session.walletAddress);
+        } catch {
+          setPendingSignature(undefined);
+          setPhase("idle");
+          setFlowNotice(`That didn't go through. The slot is still yours for ${formatCountdown(holdSecondsLeft)}.`);
+          return;
+        }
+        setPhase("submitting-deploy");
+        try {
+          await submitSignedTransaction(hold.bookingId, signedXdr, session);
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 401) {
+            handleUnauthorized();
+            return;
+          }
+          setPendingSignature(undefined);
+          setPhase("deploy-failed");
+          setFlowFatalError(
+            error instanceof ApiError && error.message
+              ? error.message
+              : "Connection dropped. Your deposit is untouched.",
+          );
+          return;
+        }
+        engineRef.current.deploySubmittedAtMs = Date.now();
+        setPendingSignature(undefined);
+      }
+      await runFundStep();
+    } catch (error) {
+      handleFlowError(error);
+    } finally {
+      inFlightRef.current = false;
+    }
+  }
+
+  /** The client backed out before signing. Nothing was deployed or signed,
+   * and the stored escrow is reused on the next try -- never a second one. */
+  function cancelEscrowConfirmation(): void {
+    setEscrowConfirmation(undefined);
+    setPhase("idle");
+    setFlowNotice("Nothing was signed. The same escrow is kept for this slot.");
   }
 
   async function runFundStep(): Promise<void> {
@@ -1096,6 +1127,8 @@ export function BookingPage() {
                       <button type="button" className="button-primary" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
                         Try again
                       </button>
+                    ) : phase === "confirming-escrow" ? (
+                      <p className="escrow-lane__notice">Check the escrow ID, then confirm to sign.</p>
                     ) : (
                       <LockButton
                         waitingOn={waitingOn}
@@ -1126,7 +1159,14 @@ export function BookingPage() {
           stateDetail={escrowStateDetail(phase)}
           contractHistory={depositFacts?.contractHistory}
         >
-          {showLock && !isLocked && (
+          {showLock && !isLocked && phase === "confirming-escrow" && escrowConfirmation && (
+            <EscrowConfirmation
+              contractId={escrowConfirmation.contractId}
+              onConfirm={() => void confirmEscrow()}
+              onCancel={cancelEscrowConfirmation}
+            />
+          )}
+          {showLock && !isLocked && phase !== "confirming-escrow" && (
             <>
               {phase === "deploy-failed" ? (
                 <button type="button" className="button-escrow" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
@@ -1151,8 +1191,9 @@ export function BookingPage() {
                   {flowNotice}
                 </p>
               )}
-              {flowFatalError && (
-                <p ref={flowFatalErrorRef} className="escrow-lane__notice escrow-lane__notice--alert" role="alert" tabIndex={-1}>
+              {escrowUnavailable && <EscrowConfirmation unavailableMessage={flowFatalError} />}
+              {flowFatalError && !escrowUnavailable && (
+                <p className="escrow-lane__notice escrow-lane__notice--alert" role="alert">
                   {flowFatalError}
                 </p>
               )}
@@ -1220,6 +1261,8 @@ function escrowStateLabel(phase: DisplayPhase): string {
       return "Not locked yet";
     case "building-deploy":
       return "Creating your escrow…";
+    case "confirming-escrow":
+      return "Confirm your escrow";
     case "awaiting-deploy-signature":
       return "Waiting for your signature";
     case "submitting-deploy":
