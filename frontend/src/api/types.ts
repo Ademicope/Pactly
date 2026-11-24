@@ -89,6 +89,7 @@ export interface ProviderCard {
   location: string;
   sessionFormat: string;
   sessionLengthMinutes: number;
+  serviceCount: number;
   price: Money;
   deposit: Money;
   cancellationWindowHours: number;
