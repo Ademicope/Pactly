@@ -712,3 +712,41 @@ test("POST /bookings/:id/dispute: 200 from 'completed' and from 'approved', not 
     closeDatabase(result);
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /bookings/:id/decline
+// ---------------------------------------------------------------------------
+
+test("POST /bookings/:id/decline: 200 for the shop, 404 for another shop, 409 once locked", async () => {
+  const result = openTestDatabase();
+  try {
+    const providerWalletAddress = Keypair.random().publicKey();
+    const providerProfileId = await seedProviderProfile(result, { walletAddress: providerWalletAddress });
+    const holdId = await seedBooking(result, { providerProfileId });
+    const app = createApp(result.db, { escrowAdapter: fakeEscrowAdapter() });
+
+    const otherShop = await app.request(`/bookings/${holdId}/decline`, {
+      method: "POST",
+      headers: await authHeader(Keypair.random().publicKey()),
+    });
+    assert.equal(otherShop.status, 404);
+    assert.equal(((await otherShop.json()) as { code: string }).code, "BOOKING_NOT_FOUND");
+
+    const declined = await app.request(`/bookings/${holdId}/decline`, {
+      method: "POST",
+      headers: await authHeader(providerWalletAddress),
+    });
+    assert.equal(declined.status, 200);
+    assert.notEqual((await getBookingById(result.db, holdId))?.declinedAt, null);
+
+    const locked = await seedLockedBooking(result);
+    const lockedResponse = await app.request(`/bookings/${locked.bookingId}/decline`, {
+      method: "POST",
+      headers: await authHeader(locked.providerWalletAddress),
+    });
+    assert.equal(lockedResponse.status, 409);
+    assert.equal(((await lockedResponse.json()) as { code: string }).code, "BOOKING_STATE");
+  } finally {
+    closeDatabase(result);
+  }
+});

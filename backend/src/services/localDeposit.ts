@@ -68,6 +68,9 @@ export class SandboxOnlyError extends Error {
 }
 
 function requireHoldNotExpired(booking: BookingRow, now: number): void {
+  if (booking.declinedAt !== null) {
+    throw new BookingEscrowStateError(`Booking "${booking.id}" was declined by the shop`);
+  }
   if (
     booking.escrowState === null
     && booking.escrowContractId === null

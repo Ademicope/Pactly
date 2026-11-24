@@ -280,9 +280,8 @@ export interface BookingListItemBase {
   contractId: string | null;
   /** UTC epoch seconds. */
   holdExpiresAt: number | null;
-  /** `"shop-closed-date"` when the shop closed this date and released this
-   * unpaid hold early -- the client's card says no deposit was taken. */
-  holdReleasedReason: "shop-closed-date" | null;
+  /** UTC epoch seconds when the shop declined this hold, `null` otherwise. */
+  declinedAt: number | null;
   /** The AD-13 hold's own window has passed with no chain evidence at all --
    * shown under a separate, collapsed "Expired holds" group, never mixed
    * into the main list (the spec's own "Always" rule). */

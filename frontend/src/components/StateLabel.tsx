@@ -7,6 +7,8 @@ export interface StateLabelProps {
    * "Resolved" row: "Refunded to you" for the client, "Refunded to the
    * client" for the provider). */
   viewer: "client" | "provider";
+  /** The shop declined this hold -- replaces the lifecycle wording. */
+  declined?: boolean;
 }
 
 /** The spec's own "Resolved" wording, one direction per viewer per outcome
@@ -58,6 +60,9 @@ function stateTone(action: BookingLifecycle["action"]): "neutral" | "positive" |
  * removing the class still leaves a complete sentence.
  */
 export function StateLabel(props: StateLabelProps) {
+  if (props.declined) {
+    return <span className="state-label state-label--neutral">Declined by the shop</span>;
+  }
   const tone = stateTone(props.lifecycle.action);
   return <span className={`state-label state-label--${tone}`}>{bookingStateLabel(props)}</span>;
 }

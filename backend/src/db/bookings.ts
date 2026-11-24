@@ -161,6 +161,7 @@ export async function getExpiredHoldForWalletAndSlot(
         eq(bookings.clientWalletAddress, clientWalletAddress),
         isNull(bookings.escrowState),
         isNull(bookings.escrowContractId),
+        isNull(bookings.declinedAt),
         lt(bookings.holdExpiresAt, now),
       ),
     )
@@ -961,17 +962,27 @@ export async function setAnchorTrustlineTxHash(db: Db, bookingId: string, txHash
 }
 
 /**
- * Marks a booking as arrived -- the provider's record that the client showed
- * up. Succeeds (returns `true`) only once: the first call for a booking with
- * no `arrivedAt` yet set. A second call returns `false` (keeps the first
- * timestamp), and a call for a nonexistent booking also returns `false`.
+ * Declines an unlocked hold: stamps `declined_at` and ends the hold at once
+ * (`hold_expires_at` moves strictly before `now`), which frees the slot for
+ * every availability and hold query. One conditional UPDATE, so a lock that
+ * lands, a deploy that is relayed, or a second decline between the caller's
+ * read and this write is a no-op. Returns `true` when the hold was declined.
  */
-export async function markBookingArrived(db: Db, bookingId: string, arrivedAt: number): Promise<boolean> {
+export async function declineBookingHold(db: Db, bookingId: string, now: number): Promise<boolean> {
   const result = await db
     .update(bookings)
-    .set({ arrivedAt })
-    .where(and(eq(bookings.id, bookingId), isNull(bookings.arrivedAt)));
+    .set({ declinedAt: now, holdExpiresAt: now - 1 })
+    .where(
+      and(
+        eq(bookings.id, bookingId),
+        isNull(bookings.escrowState),
+        isNull(bookings.deploySubmittedAt),
+        isNull(bookings.declinedAt),
+      ),
+    );
   return result.changes > 0;
+}
+
 /** Issue #35: marks client reminder as shown at the given timestamp. Once set,
  * never cleared, so a booking only shows its client reminder once. */
 export async function markClientReminderShown(db: Db, bookingId: string, shownAt: number): Promise<void> {

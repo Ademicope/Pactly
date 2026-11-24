@@ -523,6 +523,11 @@ export function submitBalancePayment(bookingId: string, signedXdr: string, sessi
   return apiPost<BalancePaymentSubmitResponse>(`/bookings/${bookingId}/balance/submit`, { signedXdr }, session.token);
 }
 
+/** The shop declines an unlocked hold on its own slot. */
+export function declineHold(bookingId: string, session: Session): Promise<{ ok: true }> {
+  return apiPost<{ ok: true }>(`/bookings/${bookingId}/decline`, {}, session.token);
+}
+
 export function markBalancePaidCash(bookingId: string, session: Session): Promise<{ ok: true }> {
   return apiPost<{ ok: true }>(`/bookings/${bookingId}/balance/mark-cash`, {}, session.token);
 }

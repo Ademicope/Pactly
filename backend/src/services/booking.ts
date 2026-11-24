@@ -73,6 +73,7 @@ import {
   markBalancePaidPlatform,
   markBookingArrived,
   markClientReminderShown,
+  declineBookingHold,
   markProviderReminderShown,
   recordDeploySubmission,
   recordProviderCancellationCountedSync,
@@ -688,17 +689,36 @@ function requireHoldNotExpired(booking: BookingRow, now: number): void {
   }
 }
 
-/** Refuses {@link SlotInPastError} when the booking's slot has already
- * started (or is starting right now) according to the server clock.
- * This check applies to `lockDeposit` and `fundDeposit` -- a hold may have
- * been created when the slot was in the future, but locking/funding must
- * be refused once the slot start time has passed. */
-async function requireSlotNotInPast(db: Db, booking: BookingRow, now: number): Promise<void> {
-  if (booking.slotId !== null) {
-    const slot = await getSlotById(db, booking.slotId);
-    if (slot && slot.startsAt <= now) {
-      throw new SlotInPastError(slot.startsAt, now);
-    }
+/** Refuses lock/fund/submit on a hold the shop declined. Checked before the
+ * expiry guard because a declined hold that already had a contract id built
+ * is not caught by it. */
+function requireHoldNotDeclined(booking: BookingRow): void {
+  if (booking.declinedAt !== null) {
+    throw new BookingEscrowStateError(`Booking "${booking.id}" was declined by the shop`);
+  }
+}
+
+/**
+ * A shop declines an unlocked hold on its own slot: the hold ends at once,
+ * the slot is bookable again, and the client's views report it as declined.
+ * Another shop's booking (or a missing one) is refused the same
+ * {@link BookingNotFoundError} every ownership check gives. A booking that
+ * has a recorded `escrowState` (locked, released, refunded), has a deploy
+ * already relayed to the chain, or was already declined cannot be declined
+ * ({@link BookingEscrowStateError}).
+ */
+export async function declineHold(
+  db: Db,
+  bookingId: string,
+  providerWalletAddress: string,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<void> {
+  const booking = await getBookingForProvider(db, bookingId, providerWalletAddress);
+  const declined = await declineBookingHold(db, booking.id, now);
+  if (!declined) {
+    throw new BookingEscrowStateError(
+      `Booking "${bookingId}" must be an unlocked hold to decline it (escrowState is "${booking.escrowState}")`,
+    );
   }
 }
 
@@ -792,6 +812,7 @@ export async function lockDeposit(
   if (booking.escrowState !== null) {
     throw new BookingEscrowStateError(`Booking "${bookingId}" already has escrow_state "${booking.escrowState}"; lockDeposit cannot run again`);
   }
+  requireHoldNotDeclined(booking);
   requireHoldNotExpired(booking, now);
   await requireSlotNotInPast(db, booking, now);
 
@@ -997,6 +1018,7 @@ export async function fundDeposit(
   if (booking.escrowState !== null) {
     throw new BookingEscrowStateError(`Booking "${bookingId}" already has escrow_state "${booking.escrowState}"; cannot fund again`);
   }
+  requireHoldNotDeclined(booking);
   requireHoldNotExpired(booking, now);
   await requireSlotNotInPast(db, booking, now);
 
@@ -1957,11 +1979,8 @@ export interface BookingView {
   /** Story 3.6 (review round): see {@link derivePendingAction}. */
   pendingAction: EscrowActionKind | null;
   holdExpiresAt: number | null;
-  /** Set only when the shop closed this date and released this unpaid
-   * hold early (`shop-closed-date`); `null` for a plain expiry or a locked
-   * booking. Drives the client's "the shop closed this date, no deposit was
-   * taken" copy. */
-  holdReleasedReason: BookingRow["holdReleaseReason"];
+  /** UTC epoch seconds when the shop declined this hold, `null` otherwise. */
+  declinedAt: number | null;
   contractId: string | null;
   /** Issue #5: one of the two facts the status panel now shows separately --
    * Pactly's own recorded evidence that a signed deploy for this booking
@@ -2059,7 +2078,7 @@ export async function getBookingView(
     lifecycle: { contractId: lifecycle.contractId, action: lifecycle.action, outcome: lifecycle.outcome },
     pendingAction: derivePendingAction(booking, lifecycle.action),
     holdExpiresAt: booking.holdExpiresAt,
-    holdReleasedReason: booking.holdReleaseReason,
+    declinedAt: booking.declinedAt,
     contractId: booking.escrowContractId,
     deploySubmitted: booking.deploySubmittedAt !== null,
     contractHistory: (await listContractDeployments(db, booking.id)).map((row) => ({
@@ -2216,6 +2235,7 @@ export async function submitSignedTransaction(
   now: number = Math.floor(Date.now() / 1000),
 ): Promise<SubmitTransactionResult> {
   const booking = await requireBooking(db, bookingId);
+  requireHoldNotDeclined(booking);
   const hash = computeSignedTransactionHash(signedXdr);
 
   const match = candidateActionHashes(booking).find(
@@ -2336,9 +2356,11 @@ export interface BookingListItemBase {
   serverTime: number;
   contractId: string | null;
   holdExpiresAt: number | null;
-  /** Set when a shop's close-date action released this unpaid hold early;
-   * the client's card says so instead of showing a bare expiry. */
-  holdReleasedReason: BookingRow["holdReleaseReason"];
+  /** UTC epoch seconds when the shop declined this hold, `null` otherwise.
+   * A declined hold is never an expired one. */
+  declinedAt: number | null;
+  /** Issue #35: true when this read triggered showing a reminder. */
+  reminderShown: boolean;
   /** The AD-13 hold's own 10-minute window has passed with `escrowState`
    * still `null` -- the spec's own "Always" rule: "An expired, never-funded
    * hold is listed under 'Expired holds' (collapsed), never as a booking."
@@ -2369,6 +2391,7 @@ function isExpiredHoldRow(booking: BookingRow, now: number): boolean {
   return (
     booking.escrowState === null
     && booking.escrowContractId === null
+    && booking.declinedAt === null
     && booking.holdExpiresAt !== null
     && booking.holdExpiresAt < now
   );
@@ -2410,7 +2433,8 @@ function toBookingListItemBase(
     serverTime: now,
     contractId: booking.escrowContractId,
     holdExpiresAt: booking.holdExpiresAt,
-    holdReleasedReason: booking.holdReleaseReason,
+    declinedAt: booking.declinedAt,
+    reminderShown,
     isExpiredHold: isExpiredHoldRow(booking, now),
     arrivedAt: booking.arrivedAt,
   };
