@@ -3,17 +3,47 @@ import { Link } from "react-router";
 import { StorefrontIcon } from "@phosphor-icons/react";
 
 import { ApiError } from "../../api/client";
-import { useProviderBookings } from "../../api/hooks";
+import { useOwnProviderProfile, useProviderBookings } from "../../api/hooks";
 import { BookingActions } from "../../components/BookingActions";
 import { BookingCard, BALANCE_STATE_LABEL } from "../../components/BookingCard";
 import { Countdown } from "../../components/Countdown";
 import { PageMasthead } from "../../components/PageMasthead";
 import { StateLabel } from "../../components/StateLabel";
 import { TryAmount } from "../../components/TryAmount";
+import { bookingProofUrl, buildReleaseMailto } from "../../lib/releaseMailto";
 import { shortenStellarId, stellarExplorerContractUrl, stellarExplorerTransactionUrl, trustlessWorkViewerUrl } from "../../lib/stellar";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
 import { SignInPanel } from "../../components/SignInPanel";
 import { getSession, signOut, type Session } from "../../wallet";
+import type { ProviderBookingListItem } from "../../api/types";
+
+function ReleaseMailtoLink({
+  escrowState,
+  clientEmail,
+  shopName,
+  slotStartsAt,
+  bookingId,
+}: {
+  escrowState: ProviderBookingListItem["escrowState"];
+  clientEmail: string | null;
+  shopName: string;
+  slotStartsAt: number | null;
+  bookingId: string;
+}) {
+  const mailto = buildReleaseMailto({
+    escrowState,
+    clientEmail,
+    shopName,
+    slotStartsAt,
+    proofUrl: bookingProofUrl(bookingId),
+  });
+  if (!mailto) return null;
+  return (
+    <a className="button-ghost" href={mailto} style={{ textDecoration: "none", display: "inline-flex", marginTop: "var(--space-2)" }}>
+      Email the client
+    </a>
+  );
+}
 
 /**
  * `/panel/bookings` -- the provider panel's own "Bookings" view (Task
@@ -27,6 +57,8 @@ export function BookingsPage() {
   const [session, setSession] = useState<Session | undefined>(() => getSession());
 
   const bookingsQuery = useProviderBookings(session);
+  const ownProfileQuery = useOwnProviderProfile(session);
+  const shopName = ownProfileQuery.data?.displayName ?? "";
 
   function handleSignOut(): void {
     signOut();
@@ -148,7 +180,11 @@ export function BookingsPage() {
                       <StateLabel lifecycle={booking.lifecycle} viewer="provider" />
                     </td>
                     <td>
-                      <Countdown cancelDeadline={booking.cancelDeadline} depositLocked={booking.escrowState === "locked"} />
+                      <Countdown
+                        cancelDeadline={booking.cancelDeadline}
+                        serverTime={booking.serverTime}
+                        depositLocked={booking.escrowState === "locked"}
+                      />
                     </td>
                     <td>
                       {booking.contractId && (
@@ -174,9 +210,18 @@ export function BookingsPage() {
                         balance={booking.balance}
                         balanceState={booking.balanceState}
                         slotStartsAt={booking.slotStartsAt}
+                        cancelDeadline={booking.cancelDeadline}
+                        serverTime={booking.serverTime}
                         session={session}
                         onActionSubmitted={() => bookingsQuery.refetch()}
                         onUnauthorized={handleSignOut}
+                      />
+                      <ReleaseMailtoLink
+                        escrowState={booking.escrowState}
+                        clientEmail={booking.clientEmail}
+                        shopName={shopName}
+                        slotStartsAt={booking.slotStartsAt}
+                        bookingId={booking.id}
                       />
                     </td>
                   </tr>
@@ -201,11 +246,14 @@ export function BookingsPage() {
                 pendingAction={booking.pendingAction}
                 balanceState={booking.balanceState}
                 cancelDeadline={booking.cancelDeadline}
+                serverTime={booking.serverTime}
                 contractId={booking.contractId}
                 balancePaymentTxHash={booking.balancePaymentTxHash}
                 session={session}
                 onActionSubmitted={() => bookingsQuery.refetch()}
                 onUnauthorized={handleSignOut}
+                clientEmail={booking.clientEmail}
+                shopName={shopName}
               />
             ))}
           </div>
@@ -231,11 +279,14 @@ export function BookingsPage() {
                 pendingAction={booking.pendingAction}
                 balanceState={booking.balanceState}
                 cancelDeadline={booking.cancelDeadline}
+                serverTime={booking.serverTime}
                 contractId={booking.contractId}
                 balancePaymentTxHash={booking.balancePaymentTxHash}
                 session={session}
                 onActionSubmitted={() => bookingsQuery.refetch()}
                 onUnauthorized={handleSignOut}
+                clientEmail={booking.clientEmail}
+                shopName={shopName}
               />
             ))}
           </div>
