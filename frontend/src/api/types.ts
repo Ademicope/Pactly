@@ -39,8 +39,29 @@ export interface ProviderProfile {
   bufferMinutes: number;
   verifiedSessionCount: number;
   isApproved: boolean;
+  /** A suspended shop is absent from discovery/search and cannot take a
+   * new hold; its own panel still reads this view to show the reason. */
+  isSuspended: boolean;
+  suspensionReason: string | null;
   /** UTC epoch seconds, ascending. */
   slots: number[];
+}
+
+/** `GET/PUT/DELETE /me/provider/closed-dates` -- the shop's one-off
+ * closures, as `YYYY-MM-DD` UTC dates. */
+export interface ClosedDatesResponse {
+  closedDates: string[];
+}
+
+/** `PUT /me/provider/profile`'s editable copy -- the commercial terms and
+ * the approval flag are deliberately absent, so an edit cannot change what
+ * a client pays. */
+export interface ProviderProfileEditInput {
+  title: string;
+  bio: string;
+  languages: string[];
+  sessionLengthMinutes: number;
+  location: string;
 }
 
 export interface CategoriesResponse {

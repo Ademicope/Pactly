@@ -40,6 +40,8 @@ import type {
   RateResponse,
   ShopReportSubmitResponse,
   ShopReportsListResponse,
+  ClosedDatesResponse,
+  ProviderProfileEditInput,
 } from "./types";
 import { FALLBACK_TRY_PER_USDC } from "../lib/money";
 import type { Session } from "../wallet";
