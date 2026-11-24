@@ -102,6 +102,8 @@ export interface ProviderCard {
   timezone: string;
   /** UTC epoch seconds, ascending, at most three. */
   earliestSlots: number[];
+  timeZone?: string;
+  publicHours?: Array<{ weekday: string; hours: string }>;
 }
 
 /** Issue #30: what an empty text search offers -- the nearest category

@@ -25,10 +25,16 @@ import {
   updateProviderProfileText as persistProviderProfileText,
   type ProviderProfileRow,
 } from "../db/providerProfiles.js";
-import { listFutureSlots, replaceFutureSlots, type AvailabilitySlotRow } from "../db/availabilitySlots.js";
+import {
+  listFutureSlots,
+  listWeeklyPatternSlotsByProvider,
+  replaceFutureSlots,
+  type AvailabilitySlotRow,
+} from "../db/availabilitySlots.js";
 import { getCategoryById, getCategoryBySlug, listCategories, listVisibleCategories, type CategoryRow } from "../db/categories.js";
 import type { Db } from "../db/client.js";
 import { listEarliestOfferedSlotsByProvider, listOfferedSlots } from "./availability.js";
+import { buildPublicHours, type PublicDayHours } from "./publicHours.js";
 
 /** Pactly's only supported asset for now (matches `services/booking.ts`'s
  * own `DEPOSIT_ASSET_SYMBOL`). Every amount this module returns is shaped
@@ -782,6 +788,8 @@ export interface ProviderCardView {
   timezone: string;
   /** UTC epoch seconds, ascending, at most {@link CARD_EARLIEST_SLOTS_LIMIT}. */
   earliestSlots: number[];
+  timeZone: string;
+  publicHours: PublicDayHours[];
 }
 
 /** One approved profile's card shape (the I/O matrix's "List all" row) --
@@ -793,6 +801,7 @@ export function buildProviderCardView(
   profile: ProviderProfileRow,
   category: CategoryRow,
   earliestSlots: number[],
+  weeklyPatternSlots: number[] = [],
 ): ProviderCardView {
   return {
     id: profile.id,
@@ -811,6 +820,12 @@ export function buildProviderCardView(
     bookingsPaused: profile.bookingsPaused,
     timezone: profile.timezone,
     earliestSlots,
+    timeZone: profile.timeZone,
+    publicHours: buildPublicHours(
+      weeklyPatternSlots,
+      profile.sessionLengthMinutes,
+      profile.timeZone,
+    ),
   };
 }
 
@@ -912,6 +927,11 @@ export async function listDiscoverProviders(
     now,
     CARD_EARLIEST_SLOTS_LIMIT,
   );
+  const weeklyPatternSlotsByProvider = await listWeeklyPatternSlotsByProvider(
+    db,
+    profiles.map((profile) => profile.id),
+    now,
+  );
 
   // Availability: a provider's *earliest* future slot is, by definition,
   // its closest one to `now` -- so "at least one open slot within the
@@ -944,7 +964,8 @@ export async function listDiscoverProviders(
     return buildProviderCardView(
       profile,
       category,
-      profile.bookingsPaused ? [] : (earliestSlotsByProvider.get(profile.id) ?? []),
+      earliestSlotsByProvider.get(profile.id) ?? [],
+      weeklyPatternSlotsByProvider.get(profile.id) ?? [],
     );
   });
 

@@ -76,6 +76,7 @@ export const providerProfiles = sqliteTable("provider_profiles", {
   /** Story 3.1: free-text location shown on the card (no geocoding in this
    * story -- Istanbul strings for the demo seed). */
   location: text("location").notNull().default(""),
+  timeZone: text("time_zone").notNull().default("UTC"),
   bio: text("bio").notNull().default(""),
   /** Issues #64/#65: the IANA timezone the shop's hours, slot labels and
    * weekday breaks are named in. Defaults to the zone the demo's hours grid

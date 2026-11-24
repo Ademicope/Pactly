@@ -15,6 +15,7 @@ export interface NewProviderProfile {
   displayName?: string;
   title?: string;
   location?: string;
+  timeZone?: string;
   bio?: string;
   languages?: string[];
   sessionFormat: string;
@@ -41,6 +42,7 @@ export async function insertProviderProfile(db: Db, values: NewProviderProfile):
     displayName: values.displayName ?? "",
     title: values.title ?? "",
     location: values.location ?? "",
+    timeZone: values.timeZone ?? "UTC",
     bio: values.bio ?? "",
     languages: JSON.stringify(values.languages ?? []),
     sessionFormat: values.sessionFormat,
@@ -171,6 +173,7 @@ export async function listApprovedProviderProfilesForDiscover(
       displayName: providerProfiles.displayName,
       title: providerProfiles.title,
       location: providerProfiles.location,
+      timeZone: providerProfiles.timeZone,
       bio: providerProfiles.bio,
       languages: providerProfiles.languages,
       sessionFormat: providerProfiles.sessionFormat,

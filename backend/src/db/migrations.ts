@@ -49,6 +49,7 @@ const STATEMENTS: readonly string[] = [
     price_amount TEXT NOT NULL,
     deposit_rate_bps INTEGER NOT NULL,
     cancellation_window_hours INTEGER NOT NULL,
+    time_zone TEXT NOT NULL DEFAULT 'UTC',
     buffer_minutes INTEGER NOT NULL DEFAULT 0,
     is_approved INTEGER NOT NULL DEFAULT 0,
     bookings_paused INTEGER NOT NULL DEFAULT 0,
@@ -291,6 +292,18 @@ export function runMigrations(sqlite: Database): void {
   }
   if (!hasColumn(sqlite, "provider_profiles", "location")) {
     sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN location TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!hasColumn(sqlite, "provider_profiles", "time_zone")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN time_zone TEXT NOT NULL DEFAULT 'UTC'`);
+  }
+  // Admin suspension: nullable, so every pre-existing profile is simply
+  // not suspended. Kept (rather than a boolean) because the panel shows
+  // the reason and the timestamp records when the last suspension began.
+  if (!hasColumn(sqlite, "provider_profiles", "suspended_at")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN suspended_at INTEGER`);
+  }
+  if (!hasColumn(sqlite, "provider_profiles", "suspension_reason")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN suspension_reason TEXT`);
   }
   // Issue #36: minimum notice minutes (0-7 days)
   if (!hasColumn(sqlite, "provider_profiles", "minimum_notice_minutes")) {
