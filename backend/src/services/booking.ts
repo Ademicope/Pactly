@@ -216,6 +216,14 @@ export class SlotTakenError extends Error {
   }
 }
 
+/** Story #18: a provider cannot book its own slot */
+export class ProviderSelfBookingError extends Error {
+  constructor() {
+    super("A provider cannot book its own slot.");
+    this.name = "ProviderSelfBookingError";
+  }
+}
+
 /** Review follow-up (Issue #51): a per-wallet cap on *pending* holds (not
  * yet locked) across every provider, so one wallet cannot tie up an
  * unbounded number of slots at once. The limit is 3 open holds. */
@@ -329,7 +337,7 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   }
   // Story #18: a provider cannot book its own slot
   if (profile.walletAddress === input.clientWalletAddress) {
-    throw new SlotTakenError();
+    throw new ProviderSelfBookingError();
   }
   const slot = await getSlotByProviderAndStart(db, profile.id, input.slotStartsAt);
   if (!slot || slot.startsAt <= now) {

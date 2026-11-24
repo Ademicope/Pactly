@@ -86,6 +86,7 @@ import {
   SlotTakenError,
   SlotUnavailableError,
   TooManyHoldsError,
+  ProviderSelfBookingError,
   XdrMismatchError,
   approveAppointment,
   buildBalancePayment,
@@ -798,6 +799,9 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
           { code: "SLOT_TAKEN", message: error.message, details: { sameDaySlots: error.sameDaySlots } },
           409,
         );
+      }
+      if (error instanceof ProviderSelfBookingError) {
+        return c.json({ code: "PROVIDER_SELF_BOOKING", message: error.message }, 409);
       }
       throw error;
     }
