@@ -11,6 +11,7 @@ import type {
   BalancePaymentSubmitResponse,
   BookingView,
   CategoriesResponse,
+  CloseProviderDateResponse,
   DiscoverFiltersParams,
   DisputeOutcome,
   DisputeReason,
@@ -192,52 +193,20 @@ export function useUpdateProviderAvailability(session: Session | undefined) {
   });
 }
 
-const CLOSED_DATES_KEY = (walletAddress: string | undefined) => ["me", "provider", "closed-dates", walletAddress] as const;
-
-/** The shop's one-off closures. Kept separate from the slot pattern so
- * closing a day never edits the repeating week. */
-export function useClosedDates(session: Session | undefined) {
-  return useQuery({
-    queryKey: CLOSED_DATES_KEY(session?.walletAddress),
-    queryFn: () => apiGet<ClosedDatesResponse>("/me/provider/closed-dates", session?.token),
-    enabled: Boolean(session),
-    retry: false,
-  });
-}
-
-export function useCloseDate(session: Session | undefined) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (date: string) => apiPut<ClosedDatesResponse>(`/me/provider/closed-dates/${date}`, {}, session?.token),
-    onSuccess: (result) => {
-      queryClient.setQueryData(CLOSED_DATES_KEY(session?.walletAddress), result);
-      queryClient.invalidateQueries({ queryKey: ["providers"] });
-    },
-  });
-}
-
-export function useReopenDate(session: Session | undefined) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (date: string) => apiDelete<ClosedDatesResponse>(`/me/provider/closed-dates/${date}`, session?.token),
-    onSuccess: (result) => {
-      queryClient.setQueryData(CLOSED_DATES_KEY(session?.walletAddress), result);
-      queryClient.invalidateQueries({ queryKey: ["providers"] });
-    },
-  });
-}
-
-/** An approved shop's text edits. The response has the original price and
- * deposit, so the form can show what stayed frozen. */
-export function useUpdateProviderProfile(session: Session | undefined) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: ProviderProfileEditInput) => apiPut<ProviderProfile>("/me/provider/profile", input, session?.token),
-    onSuccess: (profile) => {
-      queryClient.setQueryData(OWN_PROVIDER_KEY(session?.walletAddress), profile);
-      queryClient.invalidateQueries({ queryKey: ["providers"] });
-    },
-  });
+/** `POST /me/provider/availability/close-date` -- closes one local calendar
+ * date: its unpaid holds are released (no deposit is taken from those
+ * clients) and its open slots are removed. A funded booking is never
+ * released; the response names it in `needsResolution`. */
+export function closeProviderDate(
+  date: string,
+  session: Session,
+  tzOffsetMinutes = new Date().getTimezoneOffset(),
+): Promise<CloseProviderDateResponse> {
+  return apiPost<CloseProviderDateResponse>(
+    "/me/provider/availability/close-date",
+    { date, tzOffsetMinutes },
+    session.token,
+  );
 }
 
 // ---------------------------------------------------------------------------

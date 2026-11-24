@@ -125,6 +125,7 @@ import {
   submitSignedTransaction,
   type BuildBalancePaymentDeps,
 } from "./services/booking.js";
+import { InvalidCloseDateError, closeProviderDate } from "./services/availability.js";
 import { EscrowApiError, EscrowConfigError, EscrowRequestError } from "./escrow/trustless-work/errors.js";
 import { defaultEscrowAdapter } from "./escrow/trustless-work/client.js";
 import type { EscrowAdapter } from "./escrow/interface.js";
@@ -845,141 +846,26 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
-  /** `PUT /me/provider/profile`: an approved shop edits its own copy. The
-   * request carries no price, deposit rate or category, so a text edit can
-   * never change a commercial term; a pending/rejected shop is refused. */
-  app.put("/me/provider/profile", requirePactlyAuth, async (c) => {
+  /** Closing a whole date: releases that date's still-active unpaid holds
+   * (they get `shop-closed-date`, so their clients see why) and removes its
+   * future open slots. A funded booking is never released; it comes back in
+   * `needsResolution` for the provider panel to point at. Other dates are
+   * untouched. */
+  app.post("/me/provider/availability/close-date", requirePactlyAuth, async (c) => {
     const body = await c.req.json().catch(() => undefined);
     try {
-      const profile = await updateProviderProfile(db, c.get("walletAddress"), {
-        title: typeof body?.title === "string" ? body.title : "",
-        bio: typeof body?.bio === "string" ? body.bio : "",
-        languages: Array.isArray(body?.languages) ? (body.languages as string[]) : [],
-        sessionLengthMinutes:
-          typeof body?.sessionLengthMinutes === "number" ? body.sessionLengthMinutes : Number.NaN,
-        location: typeof body?.location === "string" ? body.location : "",
+      const result = await closeProviderDate(db, c.get("walletAddress"), {
+        date: typeof body?.date === "string" ? body.date : "",
+        ...(typeof body?.tzOffsetMinutes === "number" ? { tzOffsetMinutes: body.tzOffsetMinutes } : {}),
       });
-      return c.json(profile);
+      return c.json(result);
     } catch (error) {
+      if (error instanceof InvalidCloseDateError) {
+        return c.json({ code: "INVALID_DATE", message: error.message, details: error.details }, 400);
+      }
       if (error instanceof NotAProviderError) {
         return c.json({ code: "NOT_A_PROVIDER", message: error.message }, 404);
       }
-      if (error instanceof ProviderNotApprovedError) {
-        return c.json({ code: "NOT_APPROVED", message: error.message }, 403);
-      }
-      if (error instanceof InvalidProviderProfileError) {
-        return c.json({ code: "INVALID_PROFILE", message: error.message, details: error.details }, 400);
-      }
-      throw error;
-    }
-  });
-
-  // ---------------------------------------------------------------------
-  // One-off closures. A closed date is an overlay on the provider's slot
-  // pattern, not a rewrite of it: the same weekday next week keeps its
-  // slots. Every route resolves "whose shop" from the caller's own wallet.
-  // ---------------------------------------------------------------------
-
-  const closedDateErrorResponse = (error: unknown, c: Context<{ Variables: Variables }>) => {
-    if (error instanceof NotAProviderError) {
-      return c.json({ code: "NOT_A_PROVIDER", message: error.message }, 404);
-    }
-    if (error instanceof InvalidClosedDateError) {
-      return c.json({ code: "INVALID_CLOSED_DATE", message: error.message, details: error.details }, 400);
-    }
-    if (error instanceof ClosedDateBookingError) {
-      return c.json(
-        {
-          code: "DATE_HAS_BOOKING",
-          message: error.message,
-          details: { bookingId: error.bookingId, slotStartsAt: error.slotStartsAt, escrowState: error.escrowState },
-        },
-        409,
-      );
-    }
-    return undefined;
-  };
-
-  app.get("/me/provider/closed-dates", requirePactlyAuth, async (c) => {
-    try {
-      return c.json({ closedDates: await listClosedDatesForWallet(db, c.get("walletAddress")) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
-      throw error;
-    }
-  });
-
-  app.post("/me/provider/closed-dates", requirePactlyAuth, async (c) => {
-    const body = await c.req.json().catch(() => undefined);
-    try {
-      return c.json({ closedDates: await closeDate(db, c.get("walletAddress"), body?.date) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
-      throw error;
-    }
-  });
-
-  app.put("/me/provider/closed-dates/:date", requirePactlyAuth, async (c) => {
-    try {
-      return c.json({ closedDates: await closeDate(db, c.get("walletAddress"), c.req.param("date")) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
-      throw error;
-    }
-  });
-
-  app.delete("/me/provider/closed-dates/:date", requirePactlyAuth, async (c) => {
-    try {
-      return c.json({ closedDates: await reopenDate(db, c.get("walletAddress"), c.req.param("date")) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
-      throw error;
-    }
-  });
-
-  // The panel's own wording for the same operations, kept as aliases so a
-  // client never has to remember two different shapes for one closure.
-  app.get("/me/provider/availability/closed", requirePactlyAuth, async (c) => {
-    try {
-      return c.json({ closedDates: await listClosedDatesForWallet(db, c.get("walletAddress")) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
-      throw error;
-    }
-  });
-
-  app.post("/me/provider/availability/closed", requirePactlyAuth, async (c) => {
-    const body = await c.req.json().catch(() => undefined);
-    try {
-      return c.json({ closedDates: await closeDate(db, c.get("walletAddress"), body?.date) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
-      throw error;
-    }
-  });
-
-  app.put("/me/provider/availability/closed/:date", requirePactlyAuth, async (c) => {
-    try {
-      return c.json({ closedDates: await closeDate(db, c.get("walletAddress"), c.req.param("date")) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
-      throw error;
-    }
-  });
-
-  app.delete("/me/provider/availability/closed/:date", requirePactlyAuth, async (c) => {
-    try {
-      return c.json({ closedDates: await reopenDate(db, c.get("walletAddress"), c.req.param("date")) });
-    } catch (error) {
-      const mapped = closedDateErrorResponse(error, c);
-      if (mapped) return mapped;
       throw error;
     }
   });

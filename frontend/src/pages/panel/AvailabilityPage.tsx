@@ -6,13 +6,10 @@ import { ApiError } from "../../api/client";
 import { PageMasthead } from "../../components/PageMasthead";
 import { SignInPanel } from "../../components/SignInPanel";
 import {
-  useClosedDates,
-  useCloseDate,
+  closeProviderDate,
   useOwnProviderProfile,
-  useReopenDate,
   useTryRate,
   useUpdateProviderAvailability,
-  useUpdateProviderProfile,
   useUpdateProviderRules,
 } from "../../api/hooks";
 import { TryAmount } from "../../components/TryAmount";
@@ -130,12 +127,10 @@ export function AvailabilityPage() {
   const [cancellationWindowInput, setCancellationWindowInput] = useState("");
   const [bufferMinutesInput, setBufferMinutesInput] = useState("");
   const [selectedSlots, setSelectedSlots] = useState<Set<number>>(new Set());
-  const [closeDateInput, setCloseDateInput] = useState("");
-  const [editTitle, setEditTitle] = useState("");
-  const [editBio, setEditBio] = useState("");
-  const [editLanguages, setEditLanguages] = useState("");
-  const [editSessionLength, setEditSessionLength] = useState("");
-  const [editLocation, setEditLocation] = useState("");
+  const [closeDate, setCloseDate] = useState("");
+  const [closeBusy, setCloseBusy] = useState(false);
+  const [closeResult, setCloseResult] = useState<Awaited<ReturnType<typeof closeProviderDate>> | undefined>();
+  const [closeError, setCloseError] = useState<string | undefined>();
 
   // Seeds local form state only the first time a profile loads, or when it
   // switches to a *different* profile (a new sign-in) -- never on every
@@ -244,63 +239,24 @@ export function AvailabilityPage() {
     }
   }
 
-  const profileErrorDetails =
-    updateProfile.error instanceof ApiError ? (updateProfile.error.details as Record<string, string> | undefined) : undefined;
-  const profileNotApproved =
-    updateProfile.error instanceof ApiError && updateProfile.error.code === "NOT_APPROVED";
-
-  async function handleSaveProfile(event: React.FormEvent): Promise<void> {
-    event.preventDefault();
+  async function handleCloseDate(): Promise<void> {
+    if (!session || !closeDate) return;
+    setCloseBusy(true);
+    setCloseError(undefined);
+    setCloseResult(undefined);
     try {
-      const saved = await updateProfile.mutateAsync({
-        title: editTitle,
-        bio: editBio,
-        languages: editLanguages
-          .split(",")
-          .map((language) => language.trim())
-          .filter(Boolean),
-        sessionLengthMinutes: Number(editSessionLength),
-        location: editLocation,
-      });
-      setEditTitle(saved.title);
-      setEditBio(saved.bio ?? "");
-      setEditLanguages((saved.languages ?? []).join(", "));
-      setEditSessionLength(String(saved.sessionLengthMinutes));
-      setEditLocation(saved.location);
-    } catch {
-      // Surfaced through `updateProfile.error`/`profileErrorDetails`.
-    }
-  }
-
-  // A date with a locked booking is refused with the booking's id; the panel
-  // names it rather than showing a generic "couldn't close" message.
-  const closeErrorDetails =
-    closeDateMutation.error instanceof ApiError
-      ? (closeDateMutation.error.details as { bookingId?: string } | undefined)
-      : undefined;
-  const closeErrorMessage =
-    closeDateMutation.error && !closeErrorDetails?.bookingId
-      ? closeDateMutation.error instanceof ApiError
-        ? closeDateMutation.error.message
-        : "Couldn't close that date."
-      : undefined;
-
-  async function handleCloseDate(event: React.FormEvent): Promise<void> {
-    event.preventDefault();
-    if (!closeDateInput) return;
-    try {
-      await closeDateMutation.mutateAsync(closeDateInput);
-      setCloseDateInput("");
-    } catch {
-      // Surfaced through `closeDateMutation.error` above.
-    }
-  }
-
-  async function handleReopenDate(date: string): Promise<void> {
-    try {
-      await reopenDateMutation.mutateAsync(date);
-    } catch {
-      // Surfaced by the query/mutation state on the next render.
+      const result = await closeProviderDate(closeDate, session);
+      setCloseResult(result);
+      // The closed date's slots are gone server-side -- refresh the grid so
+      // the panel stops showing them as selected.
+      const refreshed = await profileQuery.refetch();
+      if (refreshed.data) {
+        setSelectedSlots(new Set(refreshed.data.slots));
+      }
+    } catch (error) {
+      setCloseError(error instanceof ApiError ? error.message : "Connection dropped. Nothing changed.");
+    } finally {
+      setCloseBusy(false);
     }
   }
 
@@ -565,41 +521,47 @@ export function AvailabilityPage() {
       </section>
 
       <section className="card" style={{ marginTop: "var(--space-6)" }}>
-        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Closed dates</h2>
+        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Close a whole date</h2>
         <p>
-          Take a single day off without changing your repeating slots. The same weekday next week stays open, and closing
-          a date never cancels a booking.
+          Closing a date removes its open slots and releases any unpaid holds on that date. Those clients see that you
+          closed the date, and no deposit is taken from them. A booking whose deposit is already locked is never released
+          — resolve it from Bookings.
         </p>
-        {closeErrorDetails?.bookingId && (
-          <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
-            That date has a locked booking ({closeErrorDetails.bookingId}). Close a different date instead.
+        <div className="field">
+          <label htmlFor="close-date">Date to close</label>
+          <input id="close-date" type="date" value={closeDate} onChange={(event) => setCloseDate(event.target.value)} />
+        </div>
+        <button
+          type="button"
+          className="button-primary"
+          onClick={() => void handleCloseDate()}
+          disabled={closeBusy || closeDate === ""}
+        >
+          {closeBusy ? "Closing…" : "Close this date"}
+        </button>
+
+        {closeError && (
+          <div className="banner banner--alert" role="alert" style={{ marginTop: "var(--space-4)" }}>
+            {closeError}
           </div>
         )}
-        {closeErrorMessage && (
-          <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
-            {closeErrorMessage}
+        {closeResult && (
+          <div className="banner" role="status" style={{ marginTop: "var(--space-4)" }}>
+            <p>
+              Closed {closeResult.date}. {closeResult.releasedHoldCount} unpaid{" "}
+              {closeResult.releasedHoldCount === 1 ? "hold was" : "holds were"} released — no deposit was taken.{" "}
+              {closeResult.closedSlotCount} open {closeResult.closedSlotCount === 1 ? "slot was" : "slots were"} removed.
+            </p>
+            {closeResult.needsResolution.length > 0 && (
+              <p>
+                {closeResult.needsResolution.length === 1
+                  ? "1 booking already has a deposit locked and was not released."
+                  : `${closeResult.needsResolution.length} bookings already have a deposit locked and were not released.`}{" "}
+                <Link to="/panel/bookings">Resolve from Bookings.</Link>
+              </p>
+            )}
           </div>
         )}
-        <form onSubmit={handleCloseDate} style={{ display: "flex", gap: "var(--space-3)", alignItems: "flex-end" }}>
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label htmlFor="closed-date">Date to close</label>
-            <input id="closed-date" type="date" value={closeDateInput} onChange={(event) => setCloseDateInput(event.target.value)} />
-          </div>
-          <button type="submit" className="button-primary" disabled={closeDateMutation.isPending || !closeDateInput}>
-            {closeDateMutation.isPending ? "Closing…" : "Close date"}
-          </button>
-        </form>
-        <ul style={{ marginTop: "var(--space-4)" }}>
-          {(closedDatesQuery.data?.closedDates ?? []).map((date) => (
-            <li key={date} style={{ display: "flex", gap: "var(--space-3)", alignItems: "center" }}>
-              <span className="tabular-nums">{date}</span>
-              <button type="button" className="button-ghost" onClick={() => void handleReopenDate(date)}>
-                Reopen
-              </button>
-            </li>
-          ))}
-          {(closedDatesQuery.data?.closedDates ?? []).length === 0 && <li>No closed dates.</li>}
-        </ul>
       </section>
     </div>
   );
