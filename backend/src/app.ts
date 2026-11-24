@@ -695,6 +695,12 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         cancellationWindowHours:
           typeof body?.cancellationWindowHours === "number" ? body.cancellationWindowHours : Number.NaN,
         minimumNoticeMinutes: typeof body?.minimumNoticeMinutes === "number" ? body.minimumNoticeMinutes : undefined,
+        maxBookingDaysAhead:
+          body?.maxBookingDaysAhead === null
+            ? null
+            : typeof body?.maxBookingDaysAhead === "number"
+              ? body.maxBookingDaysAhead
+              : undefined,
         bufferMinutes: typeof body?.bufferMinutes === "number" ? body.bufferMinutes : 0,
       });
       return c.json(profile);

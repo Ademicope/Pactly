@@ -129,6 +129,7 @@ export function AvailabilityPage() {
   const [depositRatePercentInput, setDepositRatePercentInput] = useState("");
   const [cancellationWindowInput, setCancellationWindowInput] = useState("");
   const [bufferMinutesInput, setBufferMinutesInput] = useState("");
+  const [maxBookingDaysInput, setMaxBookingDaysInput] = useState("");
   const [selectedSlots, setSelectedSlots] = useState<Set<number>>(new Set());
   const [closeDateInput, setCloseDateInput] = useState("");
   const [editTitle, setEditTitle] = useState("");
@@ -153,6 +154,11 @@ export function AvailabilityPage() {
       setDepositRatePercentInput(String(profileQuery.data.depositRateBps / 100));
       setCancellationWindowInput(String(profileQuery.data.cancellationWindowHours));
       setBufferMinutesInput(String(profileQuery.data.bufferMinutes));
+      setMaxBookingDaysInput(
+        profileQuery.data.maxBookingDaysAhead == null
+          ? ""
+          : String(profileQuery.data.maxBookingDaysAhead),
+      );
       setSelectedSlots(new Set(profileQuery.data.slots));
       setEditTitle(profileQuery.data.title);
       setEditBio(profileQuery.data.bio ?? "");
@@ -179,6 +185,19 @@ export function AvailabilityPage() {
   const depositRateBps = Number.isFinite(depositRatePercent) ? Math.round(depositRatePercent * 100) : Number.NaN;
   const cancellationWindowHours = Number(cancellationWindowInput);
   const bufferMinutes = Number(bufferMinutesInput);
+  const maxBookingDaysAhead = maxBookingDaysInput.trim() === ""
+    ? null
+    : Number(maxBookingDaysInput);
+  const visibleGridDays = maxBookingDaysAhead == null || !Number.isFinite(maxBookingDaysAhead)
+    ? gridDays
+    : gridDays
+        .map((day) => ({
+          ...day,
+          cells: day.cells.filter(
+            (cell) => cell <= now + maxBookingDaysAhead * 24 * 60 * 60,
+          ),
+        }))
+        .filter((day) => day.cells.length > 0);
   const deposit = previewDeposit(priceSmallestUnit, depositRateBps);
 
   const rulesErrorDetails =
@@ -196,6 +215,7 @@ export function AvailabilityPage() {
         priceAmount: priceSmallestUnit,
         depositRateBps,
         cancellationWindowHours,
+        maxBookingDaysAhead,
         bufferMinutes,
       });
       // Only the rules form's own fields -- an unsaved slot selection in
@@ -206,6 +226,9 @@ export function AvailabilityPage() {
       setDepositRatePercentInput(String(saved.depositRateBps / 100));
       setCancellationWindowInput(String(saved.cancellationWindowHours));
       setBufferMinutesInput(String(saved.bufferMinutes));
+      setMaxBookingDaysInput(
+        saved.maxBookingDaysAhead == null ? "" : String(saved.maxBookingDaysAhead),
+      );
     } catch {
       // Surfaced through `updateRules.error`/`rulesErrorDetails`/
       // `rulesGenericError` below -- nothing further to do here.
@@ -500,6 +523,22 @@ export function AvailabilityPage() {
             />
             {rulesErrorDetails?.bufferMinutes && <span className="field__error">{rulesErrorDetails.bufferMinutes}</span>}
           </div>
+          <div className="field">
+            <label htmlFor="maxBookingDaysAhead">Maximum days clients may book ahead</label>
+            <input
+              id="maxBookingDaysAhead"
+              inputMode="numeric"
+              type="number"
+              min={1}
+              value={maxBookingDaysInput}
+              placeholder="No limit"
+              onChange={(event) => setMaxBookingDaysInput(event.target.value)}
+            />
+            <span>Leave blank for no limit.</span>
+            {rulesErrorDetails?.maxBookingDaysAhead && (
+              <span className="field__error">{rulesErrorDetails.maxBookingDaysAhead}</span>
+            )}
+          </div>
 
           <p className="tabular-nums">
             Deposit preview: {deposit ? <TryAmount amount={deposit} /> : "--"} (the saved amount comes back from the server once you
@@ -527,7 +566,7 @@ export function AvailabilityPage() {
           </div>
         )}
         <div className="availability-grid">
-          {gridDays.map((day) => (
+          {visibleGridDays.map((day) => (
             <div className="availability-grid__day" key={day.dayLabel}>
               <span className="availability-grid__day-label">{day.dayLabel}</span>
               <div className="availability-grid__cells">

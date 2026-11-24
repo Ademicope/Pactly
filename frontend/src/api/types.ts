@@ -36,6 +36,7 @@ export interface ProviderProfile {
   deposit: Money;
   depositRateBps: number;
   cancellationWindowHours: number;
+  maxBookingDaysAhead: number | null;
   bufferMinutes: number;
   verifiedSessionCount: number;
   isApproved: boolean;

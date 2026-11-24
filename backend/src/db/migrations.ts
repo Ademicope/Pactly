@@ -48,6 +48,7 @@ const STATEMENTS: readonly string[] = [
     price_amount TEXT NOT NULL,
     deposit_rate_bps INTEGER NOT NULL,
     cancellation_window_hours INTEGER NOT NULL,
+    max_booking_days_ahead INTEGER,
     buffer_minutes INTEGER NOT NULL DEFAULT 0,
     is_approved INTEGER NOT NULL DEFAULT 0,
     suspended_at INTEGER,
@@ -253,6 +254,9 @@ export function runMigrations(sqlite: Database): void {
   // Issue #36: minimum notice minutes (0-7 days)
   if (!hasColumn(sqlite, "provider_profiles", "minimum_notice_minutes")) {
     sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN minimum_notice_minutes INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!hasColumn(sqlite, "provider_profiles", "max_booking_days_ahead")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN max_booking_days_ahead INTEGER`);
   }
   // Story 3.4: the AD-13 slot hold's own columns -- nullable, since a
   // database created before this story has `bookings` rows that never had a
