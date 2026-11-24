@@ -421,6 +421,11 @@ export interface PendingDispute {
   reason: DisputeReason;
   openerWallet: string;
   openerRole: DisputeOpenerRole;
+  /** Issue #22: the note the opener attached (free text, may be empty). */
+  note?: string;
+  /** Issue #22: the SHA-256 hex evidence hash the opener attached
+   * (64 lowercase hex characters, or undefined). */
+  evidenceHash?: string;
 }
 
 export async function setPendingDispute(db: Db, id: string, pending: PendingDispute): Promise<void> {
@@ -431,6 +436,8 @@ export async function setPendingDispute(db: Db, id: string, pending: PendingDisp
       pendingDisputeReason: pending.reason,
       pendingDisputeOpenerWallet: pending.openerWallet,
       pendingDisputeOpenerRole: pending.openerRole,
+      pendingDisputeNote: pending.note ?? null,
+      pendingDisputeEvidenceHash: pending.evidenceHash ?? null,
     })
     .where(eq(bookings.id, id));
 }

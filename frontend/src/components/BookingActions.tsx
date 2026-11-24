@@ -275,7 +275,7 @@ export function BookingActions({
     setBusyAction("dispute");
     setNotice(undefined);
     try {
-      const result = await openDispute(id, reason, session);
+      const result = await openDispute(id, reason, session, disputeNote, disputeEvidenceHash);
       setDisputeStep({ kind: "confirming", reason, suggestedOutcome: result.suggestedOutcome, unsignedXdr: result.unsignedXdr });
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -565,6 +565,24 @@ export function BookingActions({
         <div className="booking-card__dispute-panel">
           <p>What's this about?</p>
           <div className="booking-card__actions">
+            <label>
+              Note (optional)
+              <input
+                className="input"
+                value={disputeNote}
+                onChange={(e) => setDisputeNote(e.target.value)}
+                placeholder="Add a note about this dispute"
+              />
+            </label>
+            <label>
+              Evidence hash (optional)
+              <input
+                className="input"
+                value={disputeEvidenceHash}
+                onChange={(e) => setDisputeEvidenceHash(e.target.value)}
+                placeholder="SHA-256 hash of a document (64 hex chars)"
+              />
+            </label>
             {DISPUTE_REASON_OPTIONS[viewer].map((option) => (
               <button key={option.value} type="button" className="button-ghost" disabled={isBusy} onClick={() => void pickDisputeReason(option.value)}>
                 {option.label}
