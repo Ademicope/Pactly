@@ -523,62 +523,21 @@ export interface AdminApplicationsResponse {
 
 export type ProviderApplicationOutcome = "approve" | "reject";
 
-/** Saved shops: a client's personal list of shops they want to book again. */
-
-export interface SaveShopResponse {
-  savedShopId: string;
-}
-
-export interface UnsaveShopResponse {
-  unsaved: boolean;
-}
-
-export interface IsShopSavedResponse {
-  isSaved: boolean;
-}
-
-export interface SavedShop {
-  id: string;
-  provider: {
-    id: string;
-    displayName: string;
-    title: string;
-    location: string;
-    categoryId: string;
-    sessionFormat: string;
-    sessionLengthMinutes: number;
-    priceAmount: string;
-    depositRateBps: number;
-    cancellationWindowHours: number;
-    isApproved: boolean;
-    verifiedSessionCount: number;
-  };
-  savedAt: number;
-}
-
-export interface SavedShopsResponse {
-  shops: SavedShop[];
 // ---------------------------------------------------------------------------
-// Shop reports: clients can report a shop to admins.
+// Public booking proof (shareable, no sign-in)
 // ---------------------------------------------------------------------------
 
-export interface ShopReportSubmitResponse {
-  reportId: string;
+export interface ProofShop {
+  displayName: string;
+  title: string;
+  location: string;
 }
 
-export interface ShopReport {
+export interface ProofResponse {
   id: string;
-  reason: string;
-  createdAt: number;
-  reportedByWallet: string;
-  provider: {
-    id: string;
-    displayName: string;
-    walletAddress: string;
-    isApproved: boolean;
-  };
-}
-
-export interface ShopReportsListResponse {
-  reports: ShopReport[];
+  status: "locked" | "released" | "cancelled";
+  shop: ProofShop;
+  slotStartsAt: number | null;
+  deposit: Money;
+  contractId: string;
 }

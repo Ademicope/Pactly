@@ -6,6 +6,7 @@ import { ProviderProfilePage } from "./pages/provider/ProviderProfilePage";
 import { AvailabilityPage } from "./pages/panel/AvailabilityPage";
 import { BookingsPage } from "./pages/panel/BookingsPage";
 import { BookingPage } from "./pages/booking/BookingPage";
+import { ProofPage } from "./pages/proof/ProofPage";
 import { MyBookingsPage } from "./pages/my-bookings/MyBookingsPage";
 import { EventsPage } from "./pages/me-events/EventsPage";
 import { ResolutionsPage } from "./pages/admin/ResolutionsPage";
@@ -45,6 +46,7 @@ export function App() {
         <Route path="/providers/apply" element={<ApplyPage />} />
         <Route path="/providers/:id" element={<ProviderProfilePage />} />
         <Route path="/book/:providerId" element={<BookingPage />} />
+        <Route path="/proof/:id" element={<ProofPage />} />
         <Route path="/me/bookings" element={<MyBookingsPage />} />
         <Route path="/me/events" element={<EventsPage />} />
         <Route path="/panel/availability" element={<AvailabilityPage />} />

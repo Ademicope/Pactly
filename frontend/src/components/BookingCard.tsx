@@ -175,6 +175,12 @@ export function BookingCard({
         </a>
       )}
 
+      {contractId && escrowState !== null && (
+        <Link className="booking-card__explorer-link" to={`/proof/${id}`}>
+          Share proof
+        </Link>
+      )}
+
       <BookingActions
         viewer={viewer}
         id={id}
