@@ -29,7 +29,6 @@ import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
 import { WalletAddressConfirm } from "../../components/WalletAddressConfirm";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
-import { signingAddressMismatch } from "../../lib/walletConfirmation";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
 import { displayedQuoteIsStale, freshQuote, rememberQuote, type DisplayedQuote } from "../../lib/quoteFreshness";
 import { signInErrorMessage } from "../../components/SignInPanel";

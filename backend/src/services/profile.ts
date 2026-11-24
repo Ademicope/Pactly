@@ -341,14 +341,15 @@ export interface ProviderProfileView {
    * this is `true` (existing bookings are unaffected), and the profile page
    * says so instead of offering a slot. */
   bookingsPaused: boolean;
-  /** Issue #64: the shop's IANA timezone -- every slot label is rendered
-   * in this zone, never in the viewer's browser zone. */
+  /** Issues #64/#65: the shop's IANA timezone -- every slot label is
+   * rendered in this zone, and weekday breaks are named in it. */
   timezone: string;
   /** UTC epoch seconds, ascending. */
   slots: number[];
-  /** Issue #3: verified reviews, newest first. Empty stays empty -- never a
-   * placeholder rating. */
-  reviews: ReviewView[];
+  /** Issue #65: the shop's own weekly breaks -- present on the owner's own
+   * view (`GET /me/provider`), omitted from the public profile, which only
+   * ever sees the effect of them (those slots are simply not offered). */
+  breaks?: ProviderBreak[];
 }
 
 /** The one place a `ProviderProfileRow` becomes an HTTP response -- shared
@@ -461,11 +462,8 @@ export async function getOwnProviderProfile(
     throw new NotAProviderError();
   }
   const category = await loadCategoryOrThrow(db, profile.categoryId, () => new NotAProviderError());
-  const [slots, reviewRows] = await Promise.all([
-    listFutureSlots(db, profile.id, { now }),
-    listReviewsForProvider(db, profile.id),
-  ]);
-  return buildProviderProfileView(profile, category, slots, reviewRows.map(toReviewView));
+  const slots = await listFutureSlots(db, profile.id, { now });
+  return { ...buildProviderProfileView(profile, category, slots), breaks: await listProviderBreaks(db, profile.id) };
 }
 
 /** `PUT /me/provider/rules`: validates, saves, and returns the updated own
@@ -516,6 +514,48 @@ export async function setProviderBookingsPaused(
 }
 
 /**
+ * `PUT /me/provider/breaks` (issue #65): replaces the shop's weekly breaks.
+ * Each break must sit inside its weekday's own working range (derived from
+ * the shop's current future slots), breaks on the same weekday may not
+ * overlap, and a saved break immediately stops offering any *open* future
+ * slot inside it -- an already-booked slot is kept and its booking is never
+ * cancelled (that is `replaceFutureSlots`'s own rule). Returns the updated
+ * own profile.
+ */
+export async function setProviderBreaks(
+  db: Db,
+  walletAddress: string,
+  rawBreaks: unknown,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<ProviderProfileView> {
+  const profile = await getProviderProfileByWallet(db, walletAddress);
+  if (!profile) {
+    throw new NotAProviderError();
+  }
+  const breaks = validateBreaks(rawBreaks);
+  const futureSlots = await listFutureSlots(db, profile.id, { now });
+  const ranges = workingRangesForSlots(
+    futureSlots.map((slot) => slot.startsAt),
+    profile.sessionLengthMinutes,
+    profile.timezone,
+  );
+  assertBreaksWithinRanges(breaks, ranges);
+
+  await replaceProviderBreaks(db, profile.id, breaks);
+  await replaceFutureSlots(
+    db,
+    profile.id,
+    filterSlotsOutsideBreaks(
+      futureSlots.map((slot) => slot.startsAt),
+      profile.timezone,
+      breaks,
+    ),
+    now,
+  );
+  return getOwnProviderProfile(db, walletAddress, now);
+}
+
+/**
  * `PUT /me/provider/timezone` (issue #64): sets the shop's IANA timezone.
  * An unknown zone is rejected and nothing is saved. Changing the zone only
  * changes how a slot is *labelled* -- every stored instant, and so every
@@ -555,7 +595,9 @@ export async function updateProviderAvailability(
   if (Object.keys(details).length > 0) {
     throw new InvalidAvailabilitySlotsError(details);
   }
-  await replaceFutureSlots(db, profile.id, slots, now);
+  // Issue #65: a slot inside one of the shop's own breaks is never offered.
+  const breaks = await listProviderBreaks(db, profile.id);
+  await replaceFutureSlots(db, profile.id, filterSlotsOutsideBreaks(slots, profile.timezone, breaks), now);
   return getOwnProviderProfile(db, walletAddress, now);
 }
 

@@ -217,6 +217,16 @@ const STATEMENTS: readonly string[] = [
     transports TEXT NOT NULL DEFAULT '[]',
     created_at INTEGER NOT NULL
   )`,
+  // Issue #65: a break cut out of one weekday's working hours.
+  `CREATE TABLE IF NOT EXISTS provider_breaks (
+    id TEXT PRIMARY KEY,
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    weekday INTEGER NOT NULL,
+    start_minute INTEGER NOT NULL,
+    end_minute INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (provider_profile_id, weekday, start_minute)
+  )`,
   `CREATE TABLE IF NOT EXISTS webauthn_challenges (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,

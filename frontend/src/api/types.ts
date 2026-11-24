@@ -32,6 +32,14 @@ export interface CategoryWithProviderCount extends Category {
   providerCount: number;
 }
 
+/** Issue #65: a break cut out of one weekday's hours, named in the shop's
+ * own wall clock. `weekday` is 0 (Sunday) through 6 (Saturday). */
+export interface ProviderBreak {
+  weekday: number;
+  startMinute: number;
+  endMinute: number;
+}
+
 export interface ProviderProfile {
   id: string;
   displayName: string;
@@ -56,40 +64,12 @@ export interface ProviderProfile {
   /** Issue #62: the shop has paused new bookings. `slots` is empty while
    * this is `true`; existing bookings are unaffected. */
   bookingsPaused: boolean;
-  /** Issue #64: the shop's IANA timezone -- every slot label is rendered
-   * in this zone, never in the viewer's browser zone. */
+  /** Issues #64/#65: the shop's IANA timezone for slot labels and breaks. */
   timezone: string;
   /** UTC epoch seconds, ascending. */
   slots: number[];
-  /** Issue #3: verified reviews, newest first. An empty list stays empty. */
-  reviews: ProviderReview[];
-}
-
-/** One client review, tied to the released booking it came from. */
-export interface ProviderReview {
-  id: string;
-  bookingId: string;
-  rating: number;
-  comment: string;
-  /** UTC epoch seconds. */
-  createdAt: number;
-}
-
-/** `GET/PUT/DELETE /me/provider/closed-dates` -- the shop's one-off
- * closures, as `YYYY-MM-DD` UTC dates. */
-export interface ClosedDatesResponse {
-  closedDates: string[];
-}
-
-/** `PUT /me/provider/profile`'s editable copy -- the commercial terms and
- * the approval flag are deliberately absent, so an edit cannot change what
- * a client pays. */
-export interface ProviderProfileEditInput {
-  title: string;
-  bio: string;
-  languages: string[];
-  sessionLengthMinutes: number;
-  location: string;
+  /** Issue #65: present on the owner's own profile only. */
+  breaks?: ProviderBreak[];
 }
 
 export interface CategoriesResponse {

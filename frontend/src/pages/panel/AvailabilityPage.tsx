@@ -80,6 +80,28 @@ function saveErrorMessage(error: unknown): string {
   return "Connection dropped. Nothing was saved.";
 }
 
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** `"13:00"` -> `780`; `undefined` for anything that is not a wall-clock
+ * time a break can name. */
+function timeTextToMinutes(value: string): number | undefined {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value);
+  if (!match) {
+    return undefined;
+  }
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) {
+    return undefined;
+  }
+  return hours * 60 + minutes;
+}
+
+function minutesToTimeText(minutes: number): string {
+  const hours = Math.floor(minutes / 60);
+  return `${String(hours).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
 function isBlocked(cell: number, selected: ReadonlySet<number>, sessionSeconds: number): boolean {
   if (selected.has(cell)) {
     return false;
@@ -253,6 +275,46 @@ export function AvailabilityPage() {
       await updateTimezone.mutateAsync(timezoneInput.trim());
     } catch {
       // Surfaced through `timezoneErrorDetails`/`timezoneGenericError` below.
+    }
+  }
+
+  const breaksError =
+    updateBreaks.error instanceof ApiError
+      ? (updateBreaks.error.details as Record<string, unknown> | undefined)
+      : undefined;
+  const breaksErrorText = breaksError
+    ? typeof breaksError.range === "string"
+      ? breaksError.range
+      : typeof breaksError.overlapping !== "undefined"
+        ? "Two breaks overlap. Merge them or move one."
+        : "That break isn't valid."
+    : updateBreaks.error
+      ? saveErrorMessage(updateBreaks.error)
+      : undefined;
+
+  function handleAddBreak(): void {
+    const startMinute = timeTextToMinutes(breakStart);
+    const endMinute = timeTextToMinutes(breakEnd);
+    if (startMinute === undefined || endMinute === undefined || endMinute <= startMinute) {
+      return;
+    }
+    setBreaks((current) =>
+      [...current, { weekday: breakWeekday, startMinute, endMinute }].sort(
+        (a, b) => a.weekday - b.weekday || a.startMinute - b.startMinute,
+      ),
+    );
+  }
+
+  async function handleSaveBreaks(): Promise<void> {
+    try {
+      const saved = await updateBreaks.mutateAsync(breaks);
+      // A saved break prunes any open slot inside it -- mirror that here so
+      // the grid does not keep showing a slot the server just stopped
+      // offering.
+      setBreaks(saved.breaks ?? []);
+      setSelectedSlots(new Set(saved.slots));
+    } catch {
+      // Surfaced through `breaksErrorText` below.
     }
   }
 
@@ -517,6 +579,70 @@ export function AvailabilityPage() {
         </div>
         <button type="button" className="button-primary" onClick={handleSaveTimezone} disabled={updateTimezone.isPending}>
           {updateTimezone.isPending ? "Saving…" : "Save timezone"}
+        </button>
+      </section>
+
+      <section className="card" style={{ marginBottom: "var(--space-6)" }}>
+        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Daily breaks</h2>
+        <p>
+          A break cuts a window out of one weekday&rsquo;s hours. Slots before and after it stay bookable; a slot inside
+          it stops being offered (a booking already there is kept and never cancelled).
+        </p>
+        {breaks.length === 0 ? (
+          <p>No breaks yet.</p>
+        ) : (
+          <ul>
+            {breaks.map((providerBreak, index) => (
+              <li key={`${providerBreak.weekday}-${providerBreak.startMinute}`}>
+                {WEEKDAY_LABELS[providerBreak.weekday]} {minutesToTimeText(providerBreak.startMinute)}–
+                {minutesToTimeText(providerBreak.endMinute)}{" "}
+                <button
+                  type="button"
+                  className="button-ghost"
+                  onClick={() => setBreaks((current) => current.filter((_, at) => at !== index))}
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {breaksErrorText && (
+          <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
+            {breaksErrorText}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: "var(--space-3)", alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div className="field">
+            <label htmlFor="breakWeekday">Day</label>
+            <select id="breakWeekday" value={breakWeekday} onChange={(event) => setBreakWeekday(Number(event.target.value))}>
+              {WEEKDAY_LABELS.map((label, value) => (
+                <option key={label} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="breakStart">Break starts</label>
+            <input id="breakStart" type="time" value={breakStart} onChange={(event) => setBreakStart(event.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="breakEnd">Break ends</label>
+            <input id="breakEnd" type="time" value={breakEnd} onChange={(event) => setBreakEnd(event.target.value)} />
+          </div>
+          <button type="button" className="button-ghost" onClick={handleAddBreak}>
+            Add break
+          </button>
+        </div>
+        <button
+          type="button"
+          className="button-primary"
+          style={{ marginTop: "var(--space-4)" }}
+          onClick={handleSaveBreaks}
+          disabled={updateBreaks.isPending}
+        >
+          {updateBreaks.isPending ? "Saving…" : "Save breaks"}
         </button>
       </section>
 

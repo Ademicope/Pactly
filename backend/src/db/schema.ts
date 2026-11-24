@@ -77,11 +77,10 @@ export const providerProfiles = sqliteTable("provider_profiles", {
    * story -- Istanbul strings for the demo seed). */
   location: text("location").notNull().default(""),
   bio: text("bio").notNull().default(""),
-  /** Issue #64: the IANA timezone the shop's hours and slots are labelled
-   * in. Defaults to the zone the demo's hours grid has always used; the
-   * stored slot instants are never rewritten when this changes. */
+  /** Issues #64/#65: the IANA timezone the shop's hours, slot labels and
+   * weekday breaks are named in. Defaults to the zone the demo's hours grid
+   * has always used; stored slot instants are never rewritten by it. */
   timezone: text("timezone").notNull().default("Europe/Istanbul"),
-
   /** JSON-encoded array of language codes/names. */
   languages: text("languages").notNull().default("[]"),
   sessionFormat: text("session_format").notNull(),
@@ -723,7 +722,30 @@ export const passkeyCredentials = sqliteTable("passkey_credentials", {
   createdAt: integer("created_at").notNull(),
 });
 
-export const WEBAUTHN_CHALLENGE_KINDS = ["register", "login", "assert"] as const;
+/**
+ * Issue #65: a break cut out of one weekday's hours. `weekday` is 0
+ * (Sunday) through 6 (Saturday) in the owning profile's own `timezone`, and
+ * the window is `[startMinute, endMinute)`. A break is weekly/recurring,
+ * not tied to one date; `services/availability.ts` rejects an overlap and a
+ * window outside that day's working range, and a saved break prunes any
+ * *open* future slot inside it (an actively booked slot is never touched).
+ */
+export const providerBreaks = sqliteTable(
+  "provider_breaks",
+  {
+    id: text("id").primaryKey(),
+    providerProfileId: text("provider_profile_id")
+      .notNull()
+      .references(() => providerProfiles.id),
+    weekday: integer("weekday").notNull(),
+    startMinute: integer("start_minute").notNull(),
+    endMinute: integer("end_minute").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [unique().on(table.providerProfileId, table.weekday, table.startMinute)],
+);
+
+export const WEBAUTHN_CHALLENGE_KINDS = ["register", "login"] as const;
 export type WebauthnChallengeKind = (typeof WEBAUTHN_CHALLENGE_KINDS)[number];
 
 /** A pending passkey ceremony's challenge: issued by the `/options` step,
