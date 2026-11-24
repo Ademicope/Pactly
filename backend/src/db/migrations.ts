@@ -50,8 +50,7 @@ const STATEMENTS: readonly string[] = [
     cancellation_window_hours INTEGER NOT NULL,
     buffer_minutes INTEGER NOT NULL DEFAULT 0,
     is_approved INTEGER NOT NULL DEFAULT 0,
-    suspended_at INTEGER,
-    suspension_reason TEXT,
+    bookings_paused INTEGER NOT NULL DEFAULT 0,
     verified_session_count INTEGER NOT NULL DEFAULT 0,
     provider_cancellation_count INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL

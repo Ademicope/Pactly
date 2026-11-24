@@ -93,18 +93,12 @@ export const providerProfiles = sqliteTable("provider_profiles", {
    * offered (0-120). Does not change weekly hours or move existing locks. */
   bufferMinutes: integer("buffer_minutes").notNull().default(0),
   isApproved: integer("is_approved", { mode: "boolean" }).notNull().default(false),
-  /**
-   * Admin suspension. A suspended shop stays `isApproved` -- it was
-   * approved once -- but every marketplace read excludes it
-   * (`db/providerProfiles.ts`), `getPublicProviderProfile` treats it as
-   * not found, and `holdSlot` refuses it, so it cannot take new bookings.
-   * `suspensionReason` is the latest reason an admin gave: suspending
-   * twice overwrites both fields rather than appending a second reason.
-   * Clearing both (`unsuspend`) puts the shop back into discovery with no
-   * re-approval. Existing bookings are never touched.
-   */
-  suspendedAt: integer("suspended_at"),
-  suspensionReason: text("suspension_reason"),
+  /** Issue #62: the shop's own pause on *new* bookings. Independent of
+   * `isApproved` -- an admin suspension still hides the shop entirely, and
+   * this pause never clears one. While `true`, discovery advertises the
+   * shop as not taking bookings and `holdSlot` refuses a new hold; existing
+   * bookings, locks, releases and disputes are untouched. */
+  bookingsPaused: integer("bookings_paused", { mode: "boolean" }).notNull().default(false),
   /** Increases only on the chain's `released` event (FR20); never written
    * by hand outside the event worker's own bookkeeping. */
   verifiedSessionCount: integer("verified_session_count").notNull().default(0),

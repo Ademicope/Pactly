@@ -101,6 +101,7 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
             <TryAmount amount={provider.price.amount} />
           </span>
           <DepositPill variant="row" amount={provider.deposit.amount} cancellationWindowHours={provider.cancellationWindowHours} />
+          {provider.bookingsPaused ? <p className="editorial-card__role">Not taking bookings right now</p> : null}
           <Link to={lockHref} className="editorial-cta">
             {firstSlot ? "Lock with Pactly" : "View calendar"}
             <ArrowRightIcon size={16} weight="bold" aria-hidden="true" />
@@ -128,6 +129,7 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
             {provider.verifiedSessionCount > 0 ? <SealCheckIcon size={14} weight="fill" aria-label="Verified provider" /> : null}
           </h3>
           <p className="editorial-card__role">{provider.title}</p>
+          {provider.bookingsPaused ? <p className="editorial-card__role">Not taking bookings</p> : null}
         </div>
       </div>
       <div className="editorial-card__meta">

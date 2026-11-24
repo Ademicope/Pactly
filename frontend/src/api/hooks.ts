@@ -183,6 +183,18 @@ export function useUpdateProviderRules(session: Session | undefined) {
   });
 }
 
+/** Issue #62: `PUT /me/provider/pause` -- the shop's own pause/resume of
+ * new bookings (idempotent on the server; the response seeds the cache). */
+export function useSetProviderBookingsPaused(session: Session | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (paused: boolean) => apiPut<ProviderProfile>("/me/provider/pause", { paused }, session?.token),
+    onSuccess: (profile) => {
+      queryClient.setQueryData(OWN_PROVIDER_KEY(session?.walletAddress), profile);
+    },
+  });
+}
+
 export function useUpdateProviderAvailability(session: Session | undefined) {
   const queryClient = useQueryClient();
   return useMutation({

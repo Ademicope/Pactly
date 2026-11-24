@@ -53,10 +53,9 @@ export interface ProviderProfile {
   /** Issue #2: shown beside the verified-session line; zero is shown. */
   providerCancellationCount: number;
   isApproved: boolean;
-  /** A suspended shop is absent from discovery/search and cannot take a
-   * new hold; its own panel still reads this view to show the reason. */
-  isSuspended: boolean;
-  suspensionReason: string | null;
+  /** Issue #62: the shop has paused new bookings. `slots` is empty while
+   * this is `true`; existing bookings are unaffected. */
+  bookingsPaused: boolean;
   /** UTC epoch seconds, ascending. */
   slots: number[];
   /** Issue #3: verified reviews, newest first. An empty list stays empty. */
@@ -112,6 +111,9 @@ export interface ProviderCard {
   cancellationWindowHours: number;
   verifiedSessionCount: number;
   providerCancellationCount: number;
+  /** Issue #62: discovery shows the shop as not taking bookings while this
+   * is `true` (and `earliestSlots` is empty). */
+  bookingsPaused: boolean;
   /** UTC epoch seconds, ascending, at most three. */
   earliestSlots: number[];
 }

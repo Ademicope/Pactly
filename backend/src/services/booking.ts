@@ -205,6 +205,16 @@ export interface BookingProviderSummary {
  * rule ("blocks the slot for 10 minutes"). */
 export const HOLD_DURATION_SECONDS = 10 * 60;
 
+/** Issue #62: the shop has paused new bookings. A new hold is refused
+ * (`409 BOOKINGS_PAUSED`); existing locks, releases and disputes never
+ * consult this flag, so they keep working. */
+export class BookingsPausedError extends Error {
+  constructor(message = "This shop has paused new bookings. Try again later.") {
+    super(message);
+    this.name = "BookingsPausedError";
+  }
+}
+
 export class SlotUnavailableError extends Error {
   constructor(message = "That slot isn't available.") {
     super(message);
@@ -371,9 +381,10 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   if (!profile || !profile.isApproved || profile.suspendedAt !== null) {
     throw new ProviderNotFoundError();
   }
-  // Story #18: a provider cannot book its own slot
-  if (profile.walletAddress === input.clientWalletAddress) {
-    throw new ProviderSelfBookingError();
+  // Issue #62: the shop's own pause refuses only a *new* hold. Everything
+  // already locked keeps working (no other function reads this flag).
+  if (profile.bookingsPaused) {
+    throw new BookingsPausedError();
   }
   const slot = await getSlotByProviderAndStart(db, profile.id, input.slotStartsAt);
   if (!slot || slot.startsAt <= now) {
