@@ -280,18 +280,13 @@ export function useHoldSlot() {
   });
 }
 
-export function lockDeposit(
-  bookingId: string,
-  session: Session,
-  rebuild = false,
-  assertionToken?: string,
-): Promise<LockResponse> {
-  return apiPost<LockResponse>(
-    `/bookings/${bookingId}/lock`,
-    rebuild ? { rebuild: true } : {},
-    session.token,
-    { assertionToken },
-  );
+/** Gives back the caller's own unlocked hold; the slot is free again. */
+export function cancelHold(bookingId: string, session: Session): Promise<{ ok: true }> {
+  return apiDelete<{ ok: true }>(`/bookings/${bookingId}/hold`, session.token);
+}
+
+export function lockDeposit(bookingId: string, session: Session, rebuild = false): Promise<LockResponse> {
+  return apiPost<LockResponse>(`/bookings/${bookingId}/lock`, rebuild ? { rebuild: true } : {}, session.token);
 }
 
 export function fundDeposit(bookingId: string, session: Session, assertionToken?: string): Promise<FundResponse> {

@@ -108,6 +108,7 @@ import {
   XdrMismatchError,
   approveAppointment,
   buildBalancePayment,
+  cancelHold,
   completeAppointment,
   declineHold,
   fundDeposit,
@@ -1177,7 +1178,29 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
-  app.post("/bookings/:id/lock", requirePactlyAuth, requireFreshAssertion, async (c) => {
+  app.delete("/bookings/:id/hold", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    try {
+      await cancelHold(db, bookingId, c.get("walletAddress"));
+      return c.json({ ok: true });
+    } catch (error) {
+      if (error instanceof BookingNotFoundError) {
+        return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof BookingHoldExpiredError) {
+        return c.json({ code: "HOLD_EXPIRED", message: error.message }, 409);
+      }
+      if (error instanceof BookingEscrowStateError) {
+        return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
+      }
+      throw error;
+    }
+  });
+
+  app.post("/bookings/:id/lock", requirePactlyAuth, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);

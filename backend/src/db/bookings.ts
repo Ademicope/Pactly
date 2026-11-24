@@ -169,6 +169,30 @@ export async function getExpiredHoldForWalletAndSlot(
   return rows[0];
 }
 
+/**
+ * Removes one client's own hold, in a single atomic `DELETE`, so the slot is
+ * free again for the next `insertBookingHoldIfSlotFree`. Only an unlocked,
+ * unexpired hold qualifies: `escrow_state` still null, no deploy submitted
+ * on chain, and `hold_expires_at` not yet passed (exactly at the boundary
+ * the hold is still active). Returns `true` when a row was removed.
+ */
+export async function deleteUnlockedHold(
+  db: Db,
+  bookingId: string,
+  clientWalletAddress: string,
+  now: number,
+): Promise<boolean> {
+  const result = db.run(sql`
+    DELETE FROM bookings
+    WHERE id = ${bookingId}
+      AND client_wallet_address = ${clientWalletAddress}
+      AND escrow_state IS NULL
+      AND deploy_submitted_at IS NULL
+      AND (hold_expires_at IS NULL OR hold_expires_at >= ${now})
+  `);
+  return result.changes > 0;
+}
+
 /** How many *pending* holds (`escrow_state IS NULL`, not yet expired) a
  * wallet currently has open across every provider -- `holdSlot`'s own
  * per-wallet cap (review follow-up: caps abuse from one wallet opening
