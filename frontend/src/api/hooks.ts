@@ -274,12 +274,22 @@ export function useHoldSlot() {
   });
 }
 
-export function lockDeposit(bookingId: string, session: Session, rebuild = false): Promise<LockResponse> {
-  return apiPost<LockResponse>(`/bookings/${bookingId}/lock`, rebuild ? { rebuild: true } : {}, session.token);
+export function lockDeposit(
+  bookingId: string,
+  session: Session,
+  rebuild = false,
+  assertionToken?: string,
+): Promise<LockResponse> {
+  return apiPost<LockResponse>(
+    `/bookings/${bookingId}/lock`,
+    rebuild ? { rebuild: true } : {},
+    session.token,
+    { assertionToken },
+  );
 }
 
-export function fundDeposit(bookingId: string, session: Session): Promise<FundResponse> {
-  return apiPost<FundResponse>(`/bookings/${bookingId}/fund`, {}, session.token);
+export function fundDeposit(bookingId: string, session: Session, assertionToken?: string): Promise<FundResponse> {
+  return apiPost<FundResponse>(`/bookings/${bookingId}/fund`, {}, session.token, { assertionToken });
 }
 
 export function submitSignedTransaction(bookingId: string, signedXdr: string, session: Session): Promise<SubmitResponse> {
@@ -312,13 +322,14 @@ export async function fundDepositWithRetry(
   bookingId: string,
   session: Session,
   deploySubmittedAtMs: number,
+  assertionToken?: string,
   attempts = 5,
   delayMs = 2500,
 ): Promise<FundResponse> {
   const REJECTED_RETRY_WINDOW_MS = 30_000;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await fundDeposit(bookingId, session);
+      return await fundDeposit(bookingId, session, assertionToken);
     } catch (error) {
       const withinRejectedWindow = Date.now() - deploySubmittedAtMs < REJECTED_RETRY_WINDOW_MS;
       const retryable =
@@ -422,8 +433,8 @@ export function approveAppointment(bookingId: string, session: Session): Promise
   return apiPost<ActionResponse>(`/bookings/${bookingId}/approve`, {}, session.token);
 }
 
-export function releaseDeposit(bookingId: string, session: Session): Promise<ReleaseDepositResponse> {
-  return apiPost<ReleaseDepositResponse>(`/bookings/${bookingId}/release`, {}, session.token);
+export function releaseDeposit(bookingId: string, session: Session, assertionToken: string): Promise<ActionResponse> {
+  return apiPost<ActionResponse>(`/bookings/${bookingId}/release`, {}, session.token, { assertionToken });
 }
 
 /** Builds the unsigned start-dispute XDR and, in the same response, the
@@ -436,18 +447,27 @@ export function openDispute(
   bookingId: string,
   reason: DisputeReason,
   session: Session,
-  note = "",
-  evidenceHash = "",
+  assertionToken: string,
 ): Promise<OpenDisputeResponse> {
-  return apiPost<OpenDisputeResponse>(`/bookings/${bookingId}/dispute`, { reason, note, evidenceHash }, session.token);
+  return apiPost<OpenDisputeResponse>(`/bookings/${bookingId}/dispute`, { reason }, session.token, { assertionToken });
 }
 
 /** Pactly's own dispute-resolver signature -- only ever callable by the
  * admin wallet that is also `TRUSTLESS_WORK_PLATFORM_ADDRESS` (the backend
  * enforces this; `ResolutionsPage.tsx` just calls it and shows whatever
  * comes back, including a `403 NOT_DISPUTE_RESOLVER`). */
-export function resolveDispute(bookingId: string, outcome: DisputeOutcome, session: Session): Promise<ResolveDisputeResponse> {
-  return apiPost<ResolveDisputeResponse>(`/admin/bookings/${bookingId}/resolve`, { outcome }, session.token);
+export function resolveDispute(
+  bookingId: string,
+  outcome: DisputeOutcome,
+  session: Session,
+  assertionToken: string,
+): Promise<ResolveDisputeResponse> {
+  return apiPost<ResolveDisputeResponse>(
+    `/admin/bookings/${bookingId}/resolve`,
+    { outcome },
+    session.token,
+    { assertionToken },
+  );
 }
 
 /** `GET /admin/disputes` -- the admin "Resolutions" list. No retry: a

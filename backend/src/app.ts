@@ -15,6 +15,12 @@ import { cors } from "hono/cors";
 import type { Context, Next } from "hono";
 
 import {
+  beginMoneyAssertion,
+  finishMoneyAssertion,
+  requireFreshAssertion,
+  PasskeyNotRegisteredError,
+} from "./auth/assertion.js";
+import {
   buildPactlyChallenge,
   issuePactlyJwt,
   verifyPactlyChallenge,
@@ -511,12 +517,79 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     if (!contractId) {
       return c.json({ code: "invalid_request", message: "contractId is required." }, 400);
     }
+    // Issue #13: the browser's own Passkey Kit record is the only place the
+    // smart wallet's passkey public key exists, so it is recorded here, at
+    // session time, for the step-up assertion every money action requires.
+    const rawCredential: unknown = body?.credential;
+    const credential =
+      typeof rawCredential === "object" && rawCredential !== null &&
+      typeof (rawCredential as { id?: unknown }).id === "string" &&
+      typeof (rawCredential as { publicKey?: unknown }).publicKey === "string"
+        ? {
+            id: (rawCredential as { id: string }).id,
+            publicKey: (rawCredential as { publicKey: string }).publicKey,
+            transports: Array.isArray((rawCredential as { transports?: unknown }).transports)
+              ? ((rawCredential as { transports: unknown[] }).transports.filter((t): t is string => typeof t === "string"))
+              : undefined,
+          }
+        : undefined;
     try {
-      const session = await sessionForPasskeyKitWallet(db, contractId);
+      const session = await sessionForPasskeyKitWallet(db, contractId, credential);
       return c.json(session, 201);
     } catch (error) {
       if (error instanceof PasskeyKitAccountError) {
         return c.json({ code: "PASSKEY_KIT_ACCOUNT", message: error.message }, 400);
+      }
+      throw error;
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Issue #13: a fresh passkey assertion before every money action. The
+  // options/verify pair is a normal WebAuthn ceremony against the caller's
+  // own credential; its result is a five-minute token the build routes
+  // below require (`requireFreshAssertion`). Browsing, discovery and
+  // opening the panel never touch these routes.
+  // ---------------------------------------------------------------------
+
+  app.post("/auth/assertion/options", requirePactlyAuth, async (c) => {
+    try {
+      const result = await beginMoneyAssertion(db, c.get("walletAddress"), passkeyDeps);
+      return c.json(result);
+    } catch (error) {
+      if (error instanceof PasskeyNotRegisteredError) {
+        return c.json({ code: "PASSKEY_NOT_REGISTERED", message: error.message }, 404);
+      }
+      throw error;
+    }
+  });
+
+  app.post("/auth/assertion/verify", requirePactlyAuth, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const assertionId = typeof body?.assertionId === "string" ? body.assertionId : undefined;
+    const response: unknown = body?.response;
+    if (!assertionId || typeof response !== "object" || response === null) {
+      return c.json({ code: "invalid_request", message: "assertionId and response are required." }, 400);
+    }
+    try {
+      const result = await finishMoneyAssertion(
+        db,
+        c.get("walletAddress"),
+        { assertionId, response },
+        passkeyDeps,
+      );
+      return c.json(result);
+    } catch (error) {
+      if (error instanceof PasskeyUnknownError) {
+        // The credential row is gone (or was never recorded): the frontend
+        // reconnects its wallet once, which re-registers it, then retries.
+        return c.json(
+          { code: "PASSKEY_NOT_REGISTERED", message: "This account has no passkey on file yet. Sign in again to register one." },
+          404,
+        );
+      }
+      if (error instanceof PasskeyInvalidError) {
+        return c.json({ code: "PASSKEY_INVALID", message: error.message }, 400);
       }
       throw error;
     }
@@ -1089,7 +1162,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
-  app.post("/bookings/:id/lock", requirePactlyAuth, async (c) => {
+  app.post("/bookings/:id/lock", requirePactlyAuth, requireFreshAssertion, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
@@ -1128,7 +1201,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
-  app.post("/bookings/:id/fund", requirePactlyAuth, async (c) => {
+  app.post("/bookings/:id/fund", requirePactlyAuth, requireFreshAssertion, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
@@ -1646,7 +1719,7 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
     }
   });
 
-  app.post("/bookings/:id/release", requirePactlyAuth, async (c) => {
+  app.post("/bookings/:id/release", requirePactlyAuth, requireFreshAssertion, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
@@ -1681,7 +1754,7 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
    * whitelist (Story 3.6 review round), so an unknown reason *or* one that
    * belongs to the other role never reaches the adapter, both surfacing as
    * the identical `400 INVALID_REASON`. */
-  app.post("/bookings/:id/dispute", requirePactlyAuth, async (c) => {
+  app.post("/bookings/:id/dispute", requirePactlyAuth, requireFreshAssertion, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
@@ -1734,7 +1807,12 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
    * `config.trustlessWorkPlatformAddress` -- an admin who is not the
    * dispute resolver gets `403 NOT_DISPUTE_RESOLVER`, never a silent
    * success building an XDR nobody can actually sign as the resolver. */
-  app.post("/admin/bookings/:id/resolve", requirePactlyAuth, requireAdmin, async (c) => {
+  app.post(
+    "/admin/bookings/:id/resolve",
+    requirePactlyAuth,
+    requireAdmin,
+    requireFreshAssertion,
+    async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
