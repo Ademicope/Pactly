@@ -379,6 +379,9 @@ export const bookings = sqliteTable("bookings", {
    * shown to provider. */
   providerReminderShownAt: integer("provider_reminder_shown_at"),
 
+  /** Story 3.8: private note left by the client on this booking (up to 500 chars). Visible on the booking detail page to the shop and the client, never on the public profile or discovery. */
+  note: text("note"),
+
   createdAt: integer("created_at").notNull(),
 });
 

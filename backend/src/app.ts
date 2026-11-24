@@ -119,7 +119,7 @@ import { PaymentFailedError, PaymentUnavailableError } from "./payments/errors.j
 import type { SubmitPaymentDeps } from "./payments/stellar.js";
 import { config } from "./config.js";
 import { DISPUTE_OUTCOMES, type DisputeOutcome, type DisputeReason } from "./db/schema.js";
-import { getBookingById } from "./db/bookings.js";
+import { getBookingById, setBookingNote, clearBookingNote } from "./db/bookings.js";
 import {
   AmountOutOfRangeError,
   AnchorAuthError,
@@ -1810,6 +1810,54 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
   app.get("/admin/shop-reports", requirePactlyAuth, requireAdmin, async (c) => {
     const reports = await getShopReportsForAdmin(db);
     return c.json({ reports });
+  });
+
+  /** Story 3.8: get the private note on a booking. Visible only to the
+   * booking's owner and the shop. */
+  app.get("/bookings/:id/note", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    const booking = await getBookingById(db, bookingId);
+    if (!booking) {
+      return c.json({ code: "BOOKING_NOT_FOUND", message: "Booking not found." }, 404);
+    }
+    // Note is only visible on non-terminal bookings (not released or refunded)
+    if (booking.escrowState === "released" || booking.escrowState === "refunded") {
+      return c.json({ note: null });
+    }
+    return c.json({ note: booking.note });
+  });
+
+  /** Story 3.8: set/update the private note on a booking (up to 500 chars).
+   * An empty note clears the previous note. Only the booking's client
+   * can set the note. */
+  app.post("/bookings/:id/note", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    const booking = await getBookingById(db, bookingId);
+    if (!booking) {
+      return c.json({ code: "BOOKING_NOT_FOUND", message: "Booking not found." }, 404);
+    }
+    // Only the booking's client can set the note
+    if (booking.clientWalletAddress !== c.get("walletAddress")) {
+      return c.json({ code: "forbidden", message: "Only the booking client can set the note." }, 403);
+    }
+    // Get note from body, enforce 500-character limit
+    const body = await c.req.json().catch(() => ({}));
+    const note = typeof body?.note === "string" ? body.note : undefined;
+    if (note !== undefined && note.length > 500) {
+      return c.json({ code: "invalid_request", message: "Note must be 500 characters or fewer." }, 400);
+    }
+    // Note can only be set on non-terminal bookings (not released or refunded)
+    if (booking.escrowState === "released" || booking.escrowState === "refunded") {
+      return c.json({ code: "forbidden", message: "Cannot set note on a booking that is released or refunded." }, 403);
+    }
+    await setBookingNote(db, bookingId, note ?? "");
+    return c.json({ success: true });
   });
 
   return app;

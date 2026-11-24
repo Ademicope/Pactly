@@ -183,6 +183,10 @@ export interface BookingView {
    * through Pactly (`null` for unpaid or paid-in-cash) -- drives the
    * balance row's own Stellar Expert link. */
   balancePaymentTxHash: string | null;
+  /** Story 3.8: the client's private note on this booking (visible to the
+   * shop and the client on the booking detail page, never on the public
+   * profile or discovery). */
+  note: string | null;
 }
 
 // ---------------------------------------------------------------------------
