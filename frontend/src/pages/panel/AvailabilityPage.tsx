@@ -6,10 +6,13 @@ import { ApiError } from "../../api/client";
 import { PageMasthead } from "../../components/PageMasthead";
 import { SignInPanel } from "../../components/SignInPanel";
 import {
-  closeProviderDate,
+  useClosedDates,
+  useCloseDate,
   useOwnProviderProfile,
+  useReopenDate,
   useTryRate,
   useUpdateProviderAvailability,
+  useUpdateProviderProfile,
   useUpdateProviderRules,
 } from "../../api/hooks";
 import { TryAmount } from "../../components/TryAmount";
@@ -35,7 +38,7 @@ interface GridDay {
  * demo's Istanbul, UTC+3) and an accepted simplification for this story's
  * grid (no frontend test runner; manual verification only).
  */
-function buildGridDays(now: number): GridDay[] {
+function buildGridDays(now: number, timeZone?: string): GridDay[] {
   const days: GridDay[] = [];
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -53,7 +56,12 @@ function buildGridDays(now: number): GridDay[] {
     }
     if (cells.length > 0) {
       days.push({
-        dayLabel: dayDate.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }),
+                        dayLabel: dayDate.toLocaleDateString(undefined, {
+                  weekday: "short",
+                  month: "short",
+                  day: "numeric",
+                  ...(timeZone ? { timeZone } : {}),
+                }),
         cells,
       });
     }
@@ -109,7 +117,11 @@ export function AvailabilityPage() {
   const profileQuery = useOwnProviderProfile(session);
   const updateRules = useUpdateProviderRules(session);
   const updateAvailability = useUpdateProviderAvailability(session);
-  const { rate, currency, decimals, isFallback } = useTryRate();
+  const updateProfile = useUpdateProviderProfile(session);
+  const closedDatesQuery = useClosedDates(session);
+  const closeDateMutation = useCloseDate(session);
+  const reopenDateMutation = useReopenDate(session);
+  const { rate } = useTryRate();
 
   // The price is stored in USDC smallest units (AD-7) but typed in TRY.
   // Until the provider actually edits the field, what it shows is *derived*
@@ -228,6 +240,21 @@ export function AvailabilityPage() {
   const availabilityHasFieldError = Boolean(availabilityErrorDetails && Object.keys(availabilityErrorDetails).length > 0);
   const availabilityGenericError =
     updateAvailability.error && !availabilityHasFieldError ? saveErrorMessage(updateAvailability.error) : undefined;
+
+  const timezoneErrorDetails =
+    updateTimezone.error instanceof ApiError
+      ? (updateTimezone.error.details as Record<string, string> | undefined)
+      : undefined;
+  const timezoneGenericError =
+    updateTimezone.error && !timezoneErrorDetails?.timezone ? saveErrorMessage(updateTimezone.error) : undefined;
+
+  async function handleSaveTimezone(): Promise<void> {
+    try {
+      await updateTimezone.mutateAsync(timezoneInput.trim());
+    } catch {
+      // Surfaced through `timezoneErrorDetails`/`timezoneGenericError` below.
+    }
+  }
 
   async function handleSaveAvailability(): Promise<void> {
     try {
@@ -470,8 +497,33 @@ export function AvailabilityPage() {
         </form>
       </section>
 
+      <section className="card" style={{ marginBottom: "var(--space-6)" }}>
+        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Shop timezone</h2>
+        <p>Every slot is shown in this timezone, whatever zone the client is in. Your stored times never move.</p>
+        {timezoneGenericError && (
+          <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
+            {timezoneGenericError}
+          </div>
+        )}
+        <div className="field">
+          <label htmlFor="timezone">IANA timezone</label>
+          <input
+            id="timezone"
+            value={timezoneInput}
+            placeholder="Europe/Istanbul"
+            onChange={(event) => setTimezoneInput(event.target.value)}
+          />
+          {timezoneErrorDetails?.timezone && <span className="field__error">{timezoneErrorDetails.timezone}</span>}
+        </div>
+        <button type="button" className="button-primary" onClick={handleSaveTimezone} disabled={updateTimezone.isPending}>
+          {updateTimezone.isPending ? "Saving…" : "Save timezone"}
+        </button>
+      </section>
+
       <section className="card">
-        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Open slots -- next 14 days, 08:00-20:00</h2>
+        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>
+          Open slots -- next 14 days, 08:00-20:00 ({profile.timezone})
+        </h2>
         {availabilityErrorDetails && (
           <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
             {availabilityErrorDetails.count && <p>{availabilityErrorDetails.count}</p>}
@@ -503,7 +555,7 @@ export function AvailabilityPage() {
                       aria-disabled={blocked}
                       onClick={() => toggleCell(cell)}
                     >
-                      {new Date(cell * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                      {formatSlotTime(cell, profile.timezone)}
                     </button>
                   );
                 })}

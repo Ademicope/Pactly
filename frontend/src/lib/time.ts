@@ -8,12 +8,25 @@
 const TIME_FORMAT: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit" };
 const DAY_FORMAT: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric" };
 
-export function formatSlotTime(startsAt: number): string {
-  return new Date(startsAt * 1000).toLocaleTimeString(undefined, TIME_FORMAT);
+export function formatSlotTime(startsAt: number, timeZone?: string): string {
+  return new Date(startsAt * 1000).toLocaleTimeString(undefined, timeZone ? { ...TIME_FORMAT, timeZone } : TIME_FORMAT);
 }
 
-export function formatSlotDay(startsAt: number): string {
-  return new Date(startsAt * 1000).toLocaleDateString(undefined, DAY_FORMAT);
+export function formatSlotDay(startsAt: number, timeZone?: string): string {
+  return new Date(startsAt * 1000).toLocaleDateString(undefined, timeZone ? { ...DAY_FORMAT, timeZone } : DAY_FORMAT);
+}
+
+/** Issue #64: the shop's own weekday and time for one stored instant --
+ * `Mon 15:00` -- regardless of what zone the viewer's browser is in. */
+export function formatSlotWeekdayTime(startsAt: number, timeZone: string): string {
+  const weekday = new Date(startsAt * 1000).toLocaleDateString("en-US", { weekday: "short", timeZone });
+  return `${weekday} ${formatSlotTime(startsAt, timeZone)}`;
+}
+
+/** Weekday, time and the shop's timezone name together -- every slot on the
+ * profile and booking pages carries this while a shop's zone is known. */
+export function formatSlotWithZone(startsAt: number, timeZone: string): string {
+  return `${formatSlotWeekdayTime(startsAt, timeZone)} (${timeZone})`;
 }
 
 /**
@@ -39,10 +52,10 @@ export interface SlotDayGroup {
 
 /** Groups already-ascending slots by the viewer's local calendar day,
  * preserving ascending order within and across groups. */
-export function groupSlotsByDay(slots: number[]): SlotDayGroup[] {
+export function groupSlotsByDay(slots: number[], timeZone?: string): SlotDayGroup[] {
   const groups: SlotDayGroup[] = [];
   for (const slot of slots) {
-    const dayLabel = formatSlotDay(slot);
+    const dayLabel = formatSlotDay(slot, timeZone);
     const currentGroup = groups[groups.length - 1];
     if (currentGroup && currentGroup.dayLabel === dayLabel) {
       currentGroup.slots.push(slot);

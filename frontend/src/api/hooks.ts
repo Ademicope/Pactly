@@ -195,6 +195,18 @@ export function useSetProviderBookingsPaused(session: Session | undefined) {
   });
 }
 
+/** Issue #64: `PUT /me/provider/timezone` -- the shop's own IANA zone for
+ * slot labels. Stored instants are untouched. */
+export function useUpdateProviderTimezone(session: Session | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (timezone: string) => apiPut<ProviderProfile>("/me/provider/timezone", { timezone }, session?.token),
+    onSuccess: (profile) => {
+      queryClient.setQueryData(OWN_PROVIDER_KEY(session?.walletAddress), profile);
+    },
+  });
+}
+
 export function useUpdateProviderAvailability(session: Session | undefined) {
   const queryClient = useQueryClient();
   return useMutation({

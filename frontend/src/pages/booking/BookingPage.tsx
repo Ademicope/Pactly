@@ -949,7 +949,7 @@ export function BookingPage() {
         <section className="booking-lane booking-lane--client">
           <h2 className="booking-lane__heading">YOUR SIDE</h2>
           <p className="booking-lane__appointment">
-            {formatSlotDay(slotStartsAt)} · {formatSlotTime(slotStartsAt)}
+            {formatSlotWithZone(slotStartsAt, profile.timezone)}
           </p>
           <p className="booking-lane__meta">
             {SESSION_FORMAT_LABEL[profile.sessionFormat] ?? profile.sessionFormat} · {profile.sessionLengthMinutes} min
@@ -1025,7 +1025,7 @@ export function BookingPage() {
                 <div className="slot-day__chips" style={{ marginTop: "var(--space-3)" }}>
                   {holdError.sameDaySlots.map((startsAt) => (
                     <Link key={startsAt} to={`/book/${providerId}?slot=${startsAt}`} className="slot-chip tabular-nums">
-                      {formatSlotTime(startsAt)}
+                      {formatSlotWithZone(startsAt, profile.timezone)}
                     </Link>
                   ))}
                 </div>

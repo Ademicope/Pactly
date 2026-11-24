@@ -182,6 +182,7 @@ export async function listApprovedProviderProfilesForDiscover(
       bufferMinutes: providerProfiles.bufferMinutes,
       isApproved: providerProfiles.isApproved,
       bookingsPaused: providerProfiles.bookingsPaused,
+      timezone: providerProfiles.timezone,
       verifiedSessionCount: providerProfiles.verifiedSessionCount,
       providerCancellationCount: providerProfiles.providerCancellationCount,
       createdAt: providerProfiles.createdAt,
@@ -247,35 +248,6 @@ export async function setProviderProfileApproved(db: Db, id: string, isApproved:
 
 export function setProviderProfileApprovedSync(db: DbOrTx, id: string, isApproved: boolean): void {
   const result = db.update(providerProfiles).set({ isApproved }).where(eq(providerProfiles.id, id)).run();
-  if (result.changes === 0) {
-    throw new TypeError(`No provider profile exists with id "${id}"`);
-  }
-}
-
-export interface ProviderProfileSuspension {
-  /** UTC epoch milliseconds, like every `createdAt` in the schema. */
-  suspendedAt: number;
-  reason: string;
-}
-
-/** Admin suspension's one write. Passing `null` clears both columns
- * (unsuspend); passing a suspension writes the latest reason over whatever
- * was there before, so suspending twice keeps only the newest reason.
- * `isApproved` is deliberately untouched -- a suspended shop stays
- * approved internally and comes back to discovery on unsuspend without a
- * second admin approval. */
-export async function setProviderProfileSuspension(
-  db: Db,
-  id: string,
-  suspension: ProviderProfileSuspension | null,
-): Promise<void> {
-  const result = await db
-    .update(providerProfiles)
-    .set({
-      suspendedAt: suspension?.suspendedAt ?? null,
-      suspensionReason: suspension?.reason ?? null,
-    })
-    .where(eq(providerProfiles.id, id));
   if (result.changes === 0) {
     throw new TypeError(`No provider profile exists with id "${id}"`);
   }

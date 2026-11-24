@@ -56,6 +56,9 @@ export interface ProviderProfile {
   /** Issue #62: the shop has paused new bookings. `slots` is empty while
    * this is `true`; existing bookings are unaffected. */
   bookingsPaused: boolean;
+  /** Issue #64: the shop's IANA timezone -- every slot label is rendered
+   * in this zone, never in the viewer's browser zone. */
+  timezone: string;
   /** UTC epoch seconds, ascending. */
   slots: number[];
   /** Issue #3: verified reviews, newest first. An empty list stays empty. */
@@ -114,6 +117,8 @@ export interface ProviderCard {
   /** Issue #62: discovery shows the shop as not taking bookings while this
    * is `true` (and `earliestSlots` is empty). */
   bookingsPaused: boolean;
+  /** Issue #64: the shop's IANA timezone for its slot labels. */
+  timezone: string;
   /** UTC epoch seconds, ascending, at most three. */
   earliestSlots: number[];
 }

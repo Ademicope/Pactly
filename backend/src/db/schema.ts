@@ -77,6 +77,11 @@ export const providerProfiles = sqliteTable("provider_profiles", {
    * story -- Istanbul strings for the demo seed). */
   location: text("location").notNull().default(""),
   bio: text("bio").notNull().default(""),
+  /** Issue #64: the IANA timezone the shop's hours and slots are labelled
+   * in. Defaults to the zone the demo's hours grid has always used; the
+   * stored slot instants are never rewritten when this changes. */
+  timezone: text("timezone").notNull().default("Europe/Istanbul"),
+
   /** JSON-encoded array of language codes/names. */
   languages: text("languages").notNull().default("[]"),
   sessionFormat: text("session_format").notNull(),
