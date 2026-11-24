@@ -127,8 +127,7 @@ import type { SubmitPaymentDeps } from "./payments/stellar.js";
 import { config } from "./config.js";
 import { DISPUTE_OUTCOMES, type DisputeOutcome, type DisputeReason } from "./db/schema.js";
 import { getBookingById } from "./db/bookings.js";
-import { getProviderProfileById } from "./db/providerProfiles.js";
-import { getSlotById } from "./db/availabilitySlots.js";
+import { listAdminDecisionAudit } from "./db/adminDecisionAudit.js";
 import {
   AmountOutOfRangeError,
   AnchorAuthError,
@@ -1754,12 +1753,16 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
         400,
       );
     }
+    const reason = typeof body?.reason === "string" ? body.reason : undefined;
     const existing = await getBookingById(db, bookingId);
     if (!existing) {
       return c.json({ code: "BOOKING_NOT_FOUND", message: "No booking was found with that id." }, 404);
     }
     try {
-      const result = await resolveBookingDispute(db, bookingId, outcome as DisputeOutcome, escrowAdapter);
+      const result = await resolveBookingDispute(db, bookingId, outcome as DisputeOutcome, escrowAdapter, {
+        adminWallet: c.get("walletAddress"),
+        reason,
+      });
       return c.json(result);
     } catch (error) {
       if (error instanceof BookingActionPendingError) {
@@ -1794,6 +1797,11 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
 
   app.get("/admin/applications", requirePactlyAuth, requireAdmin, async (c) => {
     return c.json({ applications: await listPendingApplications(db) });
+  });
+
+  app.get("/admin/audit", requirePactlyAuth, requireAdmin, async (c) => {
+    const rows = await listAdminDecisionAudit(db);
+    return c.json({ audit: rows });
   });
 
   app.post("/admin/applications/:id/decide", requirePactlyAuth, requireAdmin, async (c) => {

@@ -74,6 +74,7 @@ import {
   setEscrowActionSubmittedAt,
   setBalancePaymentBuiltHash,
   setEscrowActionTxHash,
+  setEscrowActionTxHashSync,
   setEscrowFundTxHash,
   setPendingDispute,
   updateBalanceState,
@@ -83,14 +84,9 @@ import {
   type BookingRow,
   type EscrowActionKind,
 } from "../db/bookings.js";
-import { getSlotById, getSlotByProviderAndStart } from "../db/availabilitySlots.js";
-import { isDateClosed, utcDateFor } from "../db/closedDates.js";
-import {
-  isSlotInsideBufferAfterLocked,
-  listLockedBookingStarts,
-  listOfferedSlotsInRange,
-} from "./availability.js";
-import { recordEscrowDisputeResolution } from "../db/escrowDisputeResolutions.js";
+import { getSlotById, getSlotByProviderAndStart, listOpenSlotsInRange } from "../db/availabilitySlots.js";
+import { recordEscrowDisputeResolution, recordEscrowDisputeResolutionSync } from "../db/escrowDisputeResolutions.js";
+import { insertAdminDecisionAuditSync } from "../db/adminDecisionAudit.js";
 import { getEscrowDisputeOpeningsForBookings, recordEscrowDisputeOpening } from "../db/escrowDisputeOpenings.js";
 import { recordEscrowEventForBothParties } from "../db/escrowEvents.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
@@ -861,6 +857,7 @@ export async function resolveBookingDispute(
   bookingId: string,
   outcome: DisputeOutcome,
   adapter: EscrowAdapter = defaultEscrowAdapter,
+  audit?: { adminWallet: string; reason?: string },
 ): Promise<ResolveBookingDisputeResult> {
   const booking = await requireBooking(db, bookingId);
   // Issue #33: a second resolve returns the stored outcome and does not
@@ -899,19 +896,29 @@ export async function resolveBookingDispute(
   });
 
   const decidedAt = Math.floor(Date.now() / 1000);
-  await recordEscrowDisputeResolution(db, {
-    bookingId,
-    contractId: booking.escrowContractId,
-    outcome,
-    txHash: result.txHash,
-    decidedAt,
+  db.transaction((tx) => {
+    recordEscrowDisputeResolutionSync(tx, {
+      bookingId,
+      contractId: booking.escrowContractId as string,
+      outcome,
+      txHash: result.txHash,
+      decidedAt,
+    });
+    // Also stored on the booking row itself (duplicated from the row above)
+    // so `submitSignedTransaction`'s hash-matching rule can check every
+    // Story 3.6 action's hash from one row, without a second query.
+    setEscrowActionTxHashSync(tx, bookingId, "resolve", result.txHash);
+    if (audit) {
+      const cleanReason = typeof audit.reason === "string" ? audit.reason.trim() : "";
+      insertAdminDecisionAuditSync(tx, {
+        adminWallet: audit.adminWallet,
+        action: "resolve-dispute",
+        targetId: bookingId,
+        reason: cleanReason.length > 0 ? cleanReason : null,
+        decidedAt: Date.now(),
+      });
+    }
   });
-  // Also stored on the booking row itself (duplicated from the row above)
-  // so `submitSignedTransaction`'s hash-matching rule can check every
-  // Story 3.6 action's hash from one row, without a second query.
-  await setEscrowActionTxHash(db, bookingId, "resolve", result.txHash);
-  // Issue #31: record a "resolve" event for both parties.
-  await recordEscrowEventForBothParties(db, booking.id, booking.clientWalletAddress, providerAddress, "resolve", Math.floor(Date.now() / 1000));
 
   return { ...result, outcome };
 }
