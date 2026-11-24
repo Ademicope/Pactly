@@ -611,6 +611,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
   app.get("/providers", async (c) => {
     const category = c.req.query("category");
     const filters = parseDiscoverFilters(c);
+    filters.bookableOnly = true;
     const providers = await listDiscoverProviders(db, category, filters);
     return c.json({ providers });
   });

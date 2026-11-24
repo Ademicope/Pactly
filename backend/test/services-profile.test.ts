@@ -479,6 +479,23 @@ test("listDiscoverProviders lists a provider whose slots are all in the past wit
   }
 });
 
+test("bookable discovery includes a future slot and excludes past-only shops", async () => {
+  const result = openTestDatabase();
+  try {
+    const now = ALIGNED_NOW;
+    const future = await seedProviderProfile(result, { isApproved: true, displayName: "Future shop" });
+    const pastOnly = await seedProviderProfile(result, { isApproved: true, displayName: "Past shop" });
+    await replaceFutureSlots(result.db, future, [now + 900], now);
+    await replaceFutureSlots(result.db, pastOnly, [now - 900], now - 1800);
+
+    const cards = await listDiscoverProviders(result.db, undefined, { bookableOnly: true }, now);
+
+    assert.deepEqual(cards.map((card) => card.id), [future]);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
 test("listCategoriesWithProviderCounts counts only approved providers per category", async () => {
   const result = openTestDatabase();
   try {
