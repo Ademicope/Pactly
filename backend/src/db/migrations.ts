@@ -83,6 +83,8 @@ const STATEMENTS: readonly string[] = [
     escrow_state TEXT,
     balance_state TEXT NOT NULL DEFAULT 'unpaid',
     escrow_contract_id TEXT,
+    escrow_lock_claim_token TEXT,
+    escrow_lock_claimed_at INTEGER,
     slot_id TEXT REFERENCES availability_slots(id),
     hold_expires_at INTEGER,
     hold_released_at INTEGER,
@@ -315,6 +317,15 @@ export function runMigrations(sqlite: Database): void {
   }
   if (!hasColumn(sqlite, "bookings", "deploy_submitted_at")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN deploy_submitted_at INTEGER`);
+  }
+  // Issue #6: the in-flight first-deploy claim (see `schema.ts`'s own column
+  // comments) -- nullable, since a booking whose deploy already settled
+  // never needs one.
+  if (!hasColumn(sqlite, "bookings", "escrow_lock_claim_token")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN escrow_lock_claim_token TEXT`);
+  }
+  if (!hasColumn(sqlite, "bookings", "escrow_lock_claimed_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN escrow_lock_claimed_at INTEGER`);
   }
   // Review follow-up (Story 3.4): a future slot a booking still references
   // (actively or not) can never be hard-deleted once foreign_keys=ON --

@@ -11,7 +11,14 @@ import assert from "node:assert/strict";
 import { createApp } from "../src/app.js";
 import { issuePactlyJwt } from "../src/auth/challenge.js";
 import { NON_RESOLVER_ADMIN_WALLET } from "./testConfigEnvAdmin.js";
-import { closeDatabase, openTestDatabase, seedCategory } from "./helpers.js";
+import {
+  closeDatabase,
+  openTestDatabase,
+  seedCategory,
+  USDC_CHECK_UNAVAILABLE_WALLET_DEPS,
+  USDC_MISSING_WALLET_DEPS,
+  USDC_READY_WALLET_DEPS,
+} from "./helpers.js";
 
 const APPLICANT = "GAPPLICANTWALLETFORSTORY41TESTS";
 
@@ -155,7 +162,7 @@ test("only an admin sees the queue; approving lists the profile immediately (4.2
   const result = openTestDatabase();
   try {
     const categoryId = await seedCategory(result, "cat-approve");
-    const app = createApp(result.db);
+    const app = createApp(result.db, { usdcTrustlineDeps: USDC_READY_WALLET_DEPS });
     const applicant = await bearer(APPLICANT);
     const admin = await bearer(NON_RESOLVER_ADMIN_WALLET);
 
@@ -198,6 +205,78 @@ test("only an admin sees the queue; approving lists the profile immediately (4.2
     const reapply = await app.request("/me/provider/application", { method: "POST", headers: applicant, body: JSON.stringify(validApplication(categoryId)) });
     assert.equal(reapply.status, 409);
     assert.equal(((await reapply.json()) as { code: string }).code, "ALREADY_A_PROVIDER");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("approving a shop whose wallet cannot hold a deposit refuses, and leaves the application pending (issue #4)", async () => {
+  const result = openTestDatabase();
+  try {
+    const categoryId = await seedCategory(result, "cat-approve-not-ready");
+    const app = createApp(result.db, { usdcTrustlineDeps: USDC_MISSING_WALLET_DEPS });
+    const applicant = await bearer(APPLICANT);
+    const admin = await bearer(NON_RESOLVER_ADMIN_WALLET);
+
+    const created = await app.request("/me/provider/application", { method: "POST", headers: applicant, body: JSON.stringify(validApplication(categoryId)) });
+    const { application } = (await created.json()) as { application: { id: string } };
+
+    const refused = await app.request(`/admin/applications/${application.id}/decide`, {
+      method: "POST",
+      headers: admin,
+      body: JSON.stringify({ outcome: "approve" }),
+    });
+    assert.equal(refused.status, 409);
+    const body = (await refused.json()) as { code: string; message: string };
+    assert.equal(body.code, "WALLET_CANNOT_HOLD_DEPOSIT");
+    // Edge case: the admin's own screen says what is missing, and names
+    // nothing about how a wallet holds an asset.
+    assert.doesNotMatch(body.message, /trustline|issuer|SEP|XDR|Soroban/i, body.message);
+
+    const stillPending = await app.request(`/admin/applications/${application.id}/decide`, {
+      method: "POST",
+      headers: admin,
+      body: JSON.stringify({ outcome: "reject", reason: "Wallet not ready yet." }),
+    });
+    assert.equal(stillPending.status, 200, "the refusal never decided the application, so the admin can still decide it");
+
+    const listed = await app.request("/providers");
+    assert.equal(((await listed.json()) as { providers: unknown[] }).providers.length, 0, "and nothing was approved and listed");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("approving while the wallet check cannot be reached is a retryable 503, not an approval (issue #4 edge case)", async () => {
+  const result = openTestDatabase();
+  try {
+    const categoryId = await seedCategory(result, "cat-approve-check-down");
+    const app = createApp(result.db, { usdcTrustlineDeps: USDC_CHECK_UNAVAILABLE_WALLET_DEPS });
+    const applicant = await bearer(APPLICANT);
+    const admin = await bearer(NON_RESOLVER_ADMIN_WALLET);
+
+    const created = await app.request("/me/provider/application", { method: "POST", headers: applicant, body: JSON.stringify(validApplication(categoryId)) });
+    const { application } = (await created.json()) as { application: { id: string } };
+
+    const response = await app.request(`/admin/applications/${application.id}/decide`, {
+      method: "POST",
+      headers: admin,
+      body: JSON.stringify({ outcome: "approve" }),
+    });
+    assert.equal(response.status, 503);
+    const body = (await response.json()) as { code: string; message: string };
+    assert.equal(body.code, "WALLET_CHECK_UNAVAILABLE");
+    assert.doesNotMatch(body.message, /Horizon|trustline|issuer|fetch failed/i, body.message);
+
+    // The same decision, once the answer comes back, does approve.
+    const readyApp = createApp(result.db, { usdcTrustlineDeps: USDC_READY_WALLET_DEPS });
+    const retried = await readyApp.request(`/admin/applications/${application.id}/decide`, {
+      method: "POST",
+      headers: admin,
+      body: JSON.stringify({ outcome: "approve" }),
+    });
+    assert.equal(retried.status, 200);
+    assert.equal(((await retried.json()) as { application: { state: string } }).application.state, "approved");
   } finally {
     closeDatabase(result);
   }

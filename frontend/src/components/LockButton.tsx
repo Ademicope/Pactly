@@ -6,6 +6,11 @@ export interface LockButtonProps {
    * (EXPERIENCE.md: "Each request explains the human action ... not the
    * transaction primitive"). */
   waitingOn?: string;
+  /** Issue #5: once a deploy is confirmed there is no second deploy to
+   * offer -- what waits on the client is funding the escrow that already
+   * exists, so the button says that instead. Defaults to DESIGN.md's own
+   * "Lock with Pactly". */
+  actionLabel?: string;
   disabled?: boolean;
   onClick: () => void;
   /** Fires when the user taps "Try again" after the 60s timeout --
@@ -25,7 +30,7 @@ const RETRY_AFTER_MS = 60_000;
  * the way. Signing happens server-side now -- there is no prompt for the
  * user to find and approve.
  */
-export function LockButton({ waitingOn, disabled, onClick, onOpenWalletAgain }: LockButtonProps) {
+export function LockButton({ waitingOn, actionLabel, disabled, onClick, onOpenWalletAgain }: LockButtonProps) {
   const [showTryAgain, setShowTryAgain] = useState(false);
 
   useEffect(() => {

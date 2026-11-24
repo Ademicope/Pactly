@@ -228,6 +228,15 @@ export interface BookingView {
    * this unpaid hold early -- no deposit was taken. */
   holdReleasedReason: "shop-closed-date" | null;
   contractId: string | null;
+  /** Issue #5: `true` once the deploy behind `contractId` is confirmed on
+   * chain -- the booking then has a real escrow that simply has no deposit
+   * in it yet, which is a different fact from "created" and a different
+   * button from "Lock with Pactly". */
+  deploySubmitted: boolean;
+  /** Issue #7: every contract id a deploy ever returned for this booking,
+   * oldest first, with the one the booking currently settles against marked
+   * active. Empty for a booking that has never deployed. */
+  contractHistory: { contractId: string; active: boolean }[];
   deposit: Money;
   balance: Money;
   price: Money;

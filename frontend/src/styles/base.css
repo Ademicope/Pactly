@@ -1545,6 +1545,14 @@ button {
   color: var(--color-escrow-text);
 }
 
+.escrow-lane__state-detail {
+  margin: 0;
+  font-size: var(--text-13);
+  color: var(--color-escrow-muted);
+  line-height: 1.5;
+  max-width: 220px;
+}
+
 .escrow-lane__countdown {
   margin: 0;
   font-size: var(--text-13);
@@ -1580,6 +1588,19 @@ button {
 .escrow-proof a {
   color: var(--color-stellar);
   text-decoration: underline;
+}
+
+.escrow-history__entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 0;
+}
+
+.escrow-history__entry b {
+  font-weight: 600;
+  color: var(--color-escrow-text);
 }
 
 .lock-button-group {

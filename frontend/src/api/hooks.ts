@@ -261,6 +261,14 @@ export function fundDeposit(bookingId: string, session: Session, assertionToken?
   return apiPost<FundResponse>(`/bookings/${bookingId}/fund`, {}, session.token, { assertionToken });
 }
 
+/** `GET /bookings/:id` once, outside the poll -- what the booking screen
+ * reads the moment a hold comes back, so a booking whose escrow was
+ * already created (issue #5) or whose deploy history matters (issue #7) is
+ * known before the client taps anything. */
+export function getBooking(bookingId: string, session: Session): Promise<BookingView> {
+  return apiGet<BookingView>(`/bookings/${bookingId}`, session.token);
+}
+
 export function submitSignedTransaction(bookingId: string, signedXdr: string, session: Session): Promise<SubmitResponse> {
   return apiPost<SubmitResponse>(`/bookings/${bookingId}/submit`, { signedXdr }, session.token);
 }
@@ -286,6 +294,13 @@ function sleep(ms: number): Promise<void> {
  * would just mask a genuine, permanent refusal as a slow success. Any
  * other failure (`BOOKING_STATE`, a network drop, `401`) is rethrown
  * immediately, unretried.
+ *
+ * Issue #5 adds one more retryable code: `DEPOSIT_STATUS_UNAVAILABLE`, the
+ * backend's own "the network could not be asked whether the fund you
+ * already built has landed" -- nothing moved, so asking again is the whole
+ * answer. `DEPOSIT_LANDED`, by contrast, is never retried: that one means
+ * the money is already in, and the screen's job is to wait for the
+ * confirmation, not to build a second fund.
  */
 export async function fundDepositWithRetry(
   bookingId: string,
@@ -302,7 +317,10 @@ export async function fundDepositWithRetry(
     } catch (error) {
       const withinRejectedWindow = Date.now() - deploySubmittedAtMs < REJECTED_RETRY_WINDOW_MS;
       const retryable =
-        error instanceof ApiError && (error.code === "ESCROW_UNAVAILABLE" || (error.code === "ESCROW_REJECTED" && withinRejectedWindow));
+        error instanceof ApiError &&
+        (error.code === "ESCROW_UNAVAILABLE" ||
+          error.code === "DEPOSIT_STATUS_UNAVAILABLE" ||
+          (error.code === "ESCROW_REJECTED" && withinRejectedWindow));
       if (!retryable || attempt === attempts) {
         throw error;
       }
