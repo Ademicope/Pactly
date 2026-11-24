@@ -67,6 +67,7 @@ import {
   clearUnsubmittedEscrowContractId,
   markBalancePaidCashIfUnpaid,
   markBalancePaidPlatform,
+  markBookingArrived,
   markClientReminderShown,
   markProviderReminderShown,
   recordDeploySubmission,
@@ -1539,6 +1540,37 @@ export async function markBalancePaidCash(db: Db, bookingId: string, providerWal
   }
 }
 
+/**
+ * `POST /bookings/:id/arrived`: the shop marks when a client walks in for a
+ * locked booking. Refused (typed {@link BookingNotFoundError}) for anyone
+ * but this booking's own provider; refused (typed
+ * {@link BookingEscrowStateError}) unless `escrowState` is `"locked"` (cannot
+ * mark arrived for a booking that hasn't locked yet, or one already
+ * released/refunded). Refused when the appointment hasn't started yet
+ * (slotStartsAt is in the future). The write itself ({@link markBookingArrived})
+ * keeps the first timestamp if called twice.
+ */
+export async function markArrived(db: Db, bookingId: string, providerWalletAddress: string, now: number): Promise<void> {
+  const booking = await getBookingForProvider(db, bookingId, providerWalletAddress);
+  if (booking.escrowState !== "locked") {
+    throw new BookingEscrowStateError(
+      `Booking "${bookingId}" must be locked to mark arrived (escrowState is "${booking.escrowState}")`,
+    );
+  }
+  
+  // Get the slot to check start time
+  const slot = booking.slotId ? await getSlotById(db, booking.slotId) : null;
+  if (!slot) {
+    throw new BookingEscrowStateError(`Booking "${bookingId}" has no slot to determine start time`);
+  }
+  
+  if (slot.startsAt > now) {
+    throw new BookingEscrowStateError(`Cannot mark arrived before appointment start (starts at ${slot.startsAt}, now is ${now})`);
+  }
+  
+  await markBookingArrived(db, bookingId, now);
+}
+
 // ---------------------------------------------------------------------------
 // Story 3.4: the owner check every booking route shares, `submit`, the
 // booking read view, and the hold-expiry runner tick.
@@ -1653,6 +1685,9 @@ export interface BookingView {
    * no transaction to point at). Drives the balance row's own Stellar
    * Expert link, per the spec's own "Always" rule. */
   balancePaymentTxHash: string | null;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
   /** Issue #35: true when this read triggered showing a reminder (appointment
    * day-before notice). False when already shown or conditions not met. */
   reminderShown: boolean;
@@ -1716,6 +1751,7 @@ export async function getBookingView(
       ? { id: profile.id, displayName: profile.displayName, title: profile.title }
       : { id: booking.providerProfileId, displayName: "", title: "" },
     balancePaymentTxHash: booking.balancePaymentTxHash,
+    arrivedAt: booking.arrivedAt,
     reminderShown,
   };
 }
@@ -1972,6 +2008,9 @@ export interface BookingListItemBase {
    * (Story 3.4's own double-sale note: an expired hold's escrow may still
    * reconcile later, so it must stay traceable from this list too). */
   isExpiredHold: boolean;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
 }
 
 export interface ClientBookingListItem extends BookingListItemBase {
@@ -2035,6 +2074,7 @@ function toBookingListItemBase(
     holdExpiresAt: booking.holdExpiresAt,
     reminderShown,
     isExpiredHold: isExpiredHoldRow(booking, now),
+    arrivedAt: booking.arrivedAt,
   };
 }
 

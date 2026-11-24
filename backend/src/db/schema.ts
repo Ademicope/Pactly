@@ -392,6 +392,12 @@ export const bookings = sqliteTable("bookings", {
    * balance payment does. */
   anchorTrustlineTxHash: text("anchor_trustline_tx_hash"),
 
+  /**
+   * Story: Mark client arrived -- the shop marks when a client walks in for
+   * a locked booking, at or after the appointment start. Set once by the
+   * provider; clients see it but cannot set it themselves. UTC epoch seconds.
+   */
+  arrivedAt: integer("arrived_at"),
   /** Issue #35: UTC epoch seconds when client reminder was shown. Set once,
    * never cleared. When null and appointment is within 24h, reminder is
    * shown to client. */

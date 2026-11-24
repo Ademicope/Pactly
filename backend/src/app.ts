@@ -108,6 +108,7 @@ import {
   listBookingsForProvider,
   listOpenDisputes,
   lockDeposit,
+  markArrived,
   markBalancePaidCash,
   openDispute,
   releaseDeposit,
@@ -1919,6 +1920,25 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
     }
   });
 
+  /** The provider marks when a client walks in -- once per booking, at or
+   * after the appointment start. A client (or anyone else with no provider
+   * profile) calling this on someone else's booking gets the same
+   * `404 BOOKING_NOT_FOUND` every other ownership check in this file gives. */
+  app.post("/bookings/:id/arrived", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      await markArrived(db, bookingId, c.get("walletAddress"), now);
+      return c.json({ ok: true });
+    } catch (error) {
+      if (error instanceof BookingNotFoundError) {
+        return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof BookingEscrowStateError) {
+        return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
   // ---------------------------------------------------------------------
   // Story 5.8: admin category management. Any admin wallet may create a
   // category or hide/show an existing one.

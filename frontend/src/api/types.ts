@@ -204,6 +204,9 @@ export interface BookingView {
    * through Pactly (`null` for unpaid or paid-in-cash) -- drives the
    * balance row's own Stellar Expert link. */
   balancePaymentTxHash: string | null;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +249,9 @@ export interface BookingListItemBase {
    * shown under a separate, collapsed "Expired holds" group, never mixed
    * into the main list (the spec's own "Always" rule). */
   isExpiredHold: boolean;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
 }
 
 export interface ClientBookingListItem extends BookingListItemBase {
