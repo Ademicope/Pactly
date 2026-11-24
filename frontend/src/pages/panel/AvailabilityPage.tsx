@@ -109,6 +109,10 @@ export function AvailabilityPage() {
   const profileQuery = useOwnProviderProfile(session);
   const updateRules = useUpdateProviderRules(session);
   const updateAvailability = useUpdateProviderAvailability(session);
+  const updateProfile = useUpdateProviderProfile(session);
+  const closedDatesQuery = useClosedDates(session);
+  const closeDateMutation = useCloseDate(session);
+  const reopenDateMutation = useReopenDate(session);
   const { rate } = useTryRate();
 
   // The price is stored in USDC smallest units (AD-7) but typed in TRY.
@@ -121,6 +125,7 @@ export function AvailabilityPage() {
   const [priceEdited, setPriceEdited] = useState(false);
   const [depositRatePercentInput, setDepositRatePercentInput] = useState("");
   const [cancellationWindowInput, setCancellationWindowInput] = useState("");
+  const [bufferMinutesInput, setBufferMinutesInput] = useState("");
   const [selectedSlots, setSelectedSlots] = useState<Set<number>>(new Set());
   const [closeDate, setCloseDate] = useState("");
   const [closeBusy, setCloseBusy] = useState(false);
@@ -142,7 +147,13 @@ export function AvailabilityPage() {
       setPriceEdited(false);
       setDepositRatePercentInput(String(profileQuery.data.depositRateBps / 100));
       setCancellationWindowInput(String(profileQuery.data.cancellationWindowHours));
+      setBufferMinutesInput(String(profileQuery.data.bufferMinutes));
       setSelectedSlots(new Set(profileQuery.data.slots));
+      setEditTitle(profileQuery.data.title);
+      setEditBio(profileQuery.data.bio ?? "");
+      setEditLanguages((profileQuery.data.languages ?? []).join(", "));
+      setEditSessionLength(String(profileQuery.data.sessionLengthMinutes));
+      setEditLocation(profileQuery.data.location);
     }
   }, [profileQuery.data]);
 
@@ -162,6 +173,7 @@ export function AvailabilityPage() {
   const depositRatePercent = Number(depositRatePercentInput);
   const depositRateBps = Number.isFinite(depositRatePercent) ? Math.round(depositRatePercent * 100) : Number.NaN;
   const cancellationWindowHours = Number(cancellationWindowInput);
+  const bufferMinutes = Number(bufferMinutesInput);
   const deposit = previewDeposit(priceSmallestUnit, depositRateBps);
 
   const rulesErrorDetails =
@@ -179,6 +191,7 @@ export function AvailabilityPage() {
         priceAmount: priceSmallestUnit,
         depositRateBps,
         cancellationWindowHours,
+        bufferMinutes,
       });
       // Only the rules form's own fields -- an unsaved slot selection in
       // the availability grid below must survive this save untouched. The
@@ -187,6 +200,7 @@ export function AvailabilityPage() {
       setPriceInput("");
       setDepositRatePercentInput(String(saved.depositRateBps / 100));
       setCancellationWindowInput(String(saved.cancellationWindowHours));
+      setBufferMinutesInput(String(saved.bufferMinutes));
     } catch {
       // Surfaced through `updateRules.error`/`rulesErrorDetails`/
       // `rulesGenericError` below -- nothing further to do here.
@@ -317,6 +331,58 @@ export function AvailabilityPage() {
       )}
 
       <section className="card" style={{ marginBottom: "var(--space-6)" }}>
+        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Your shop's copy</h2>
+        <p>
+          Title, description, languages, session length and location are yours to edit. Price, deposit rate and category
+          stay as they were approved.
+        </p>
+        {profileNotApproved && (
+          <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
+            An approved shop can edit its public profile. Your application is still pending.
+          </div>
+        )}
+        {profileErrorDetails && Object.keys(profileErrorDetails).length > 0 && (
+          <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
+            {Object.values(profileErrorDetails).join(" ")}
+          </div>
+        )}
+        <form onSubmit={handleSaveProfile}>
+          <div className="field">
+            <label htmlFor="profile-title">Title</label>
+            <input id="profile-title" value={editTitle} onChange={(event) => setEditTitle(event.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="profile-bio">Description</label>
+            <textarea id="profile-bio" rows={4} value={editBio} onChange={(event) => setEditBio(event.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="profile-languages">Languages (comma separated)</label>
+            <input
+              id="profile-languages"
+              value={editLanguages}
+              onChange={(event) => setEditLanguages(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="profile-session-length">Session length (minutes)</label>
+            <input
+              id="profile-session-length"
+              inputMode="numeric"
+              value={editSessionLength}
+              onChange={(event) => setEditSessionLength(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="profile-location">How to find the shop</label>
+            <input id="profile-location" value={editLocation} onChange={(event) => setEditLocation(event.target.value)} />
+          </div>
+          <button type="submit" className="button-primary" disabled={updateProfile.isPending}>
+            {updateProfile.isPending ? "Saving…" : "Save profile"}
+          </button>
+        </form>
+      </section>
+
+      <section className="card" style={{ marginBottom: "var(--space-6)" }}>
         <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Price and deposit</h2>
         {rulesGenericError && (
           <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
@@ -363,6 +429,18 @@ export function AvailabilityPage() {
             {rulesErrorDetails?.cancellationWindowHours && (
               <span className="field__error">{rulesErrorDetails.cancellationWindowHours}</span>
             )}
+          </div>
+          <div className="field">
+            <label htmlFor="bufferMinutes">Buffer between appointments (minutes)</label>
+            <input
+              id="bufferMinutes"
+              inputMode="numeric"
+              min={0}
+              max={120}
+              value={bufferMinutesInput}
+              onChange={(event) => setBufferMinutesInput(event.target.value)}
+            />
+            {rulesErrorDetails?.bufferMinutes && <span className="field__error">{rulesErrorDetails.bufferMinutes}</span>}
           </div>
 
           <p className="tabular-nums">
