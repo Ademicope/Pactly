@@ -767,6 +767,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
   app.get("/providers", async (c) => {
     const category = c.req.query("category");
     const filters = parseDiscoverFilters(c);
+    filters.bookableOnly = true;
     const providers = await listDiscoverProviders(db, category, filters);
     // Issue #30: a search that matches nothing names the query already (the
     // frontend echoes it) and points at the nearest category that does have

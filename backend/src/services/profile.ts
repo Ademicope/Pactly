@@ -819,6 +819,8 @@ const AVAILABILITY_WINDOW_SECONDS: Record<"24h" | "week", number> = {
 };
 
 export interface DiscoverFilters {
+  /** Bookable discovery omits shops without an open slot after `now`. */
+  bookableOnly?: boolean;
   /** Trimmed search text (AC1) -- matched against display name, title,
    * bio and category name, case-insensitively, by
    * `listApprovedProviderProfilesForDiscover`. */
@@ -921,6 +923,12 @@ export async function listDiscoverProviders(
       const earliest = earliestSlotsByProvider.get(profile.id)?.[0];
       return earliest !== undefined && earliest <= now + windowSeconds;
     });
+  }
+
+  if (filters.bookableOnly) {
+    profiles = profiles.filter(
+      (profile) => earliestSlotsByProvider.get(profile.id)?.[0] !== undefined,
+    );
   }
 
   const cards = profiles.map((profile) => {
