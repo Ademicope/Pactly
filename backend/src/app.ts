@@ -95,6 +95,7 @@ import {
   approveAppointment,
   buildBalancePayment,
   completeAppointment,
+  declineHold,
   fundDeposit,
   getBookingForClient,
   getBookingView,
@@ -1406,6 +1407,27 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       if (error instanceof EscrowApiError || error instanceof EscrowRequestError || error instanceof EscrowConfigError) {
         const response = escrowErrorResponse(error);
         return c.json({ code: response.code, message: response.message }, response.status);
+      }
+      throw error;
+    }
+  });
+
+  /** A shop declines an unlocked hold on its own slot. The slot is free
+   * again and the client's views report the hold as declined. */
+  app.post("/bookings/:id/decline", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    try {
+      await declineHold(db, bookingId, c.get("walletAddress"));
+      return c.json({ ok: true });
+    } catch (error) {
+      if (error instanceof BookingNotFoundError) {
+        return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof BookingEscrowStateError) {
+        return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
       }
       throw error;
     }

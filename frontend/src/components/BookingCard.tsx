@@ -2,6 +2,7 @@ import { Link } from "react-router";
 
 import { BookingActions } from "./BookingActions";
 import { Countdown } from "./Countdown";
+import { DeclineHoldButton } from "./DeclineHoldButton";
 import { StateLabel } from "./StateLabel";
 import { TryAmount } from "./TryAmount";
 import { bookingProofUrl, buildReleaseMailto } from "../lib/releaseMailto";
@@ -61,6 +62,10 @@ export interface BookingCardProps {
   clientEmail?: string | null;
   /** Shop display name for the mailto draft body (provider view only). */
   shopName?: string;
+  /** UTC epoch seconds when the shop declined this hold. */
+  declinedAt?: number | null;
+  /** Provider view only: shows "Decline hold" for a live, unlocked hold. */
+  canDecline?: boolean;
 }
 
 /** The balance row's own three-state wording (Epic 3 context: "Balance
@@ -104,7 +109,10 @@ export function BookingCard({
   continueHref,
   clientEmail,
   shopName,
+  declinedAt,
+  canDecline,
 }: BookingCardProps) {
+  const declined = declinedAt != null;
   const releaseMailto =
     viewer === "provider"
       ? buildReleaseMailto({
@@ -123,7 +131,7 @@ export function BookingCard({
           <p className="booking-card__heading">{heading}</p>
           {subheading && <p className="booking-card__subheading">{subheading}</p>}
         </div>
-        <StateLabel lifecycle={lifecycle} viewer={viewer} />
+        <StateLabel lifecycle={lifecycle} viewer={viewer} declined={declined} />
       </header>
 
       <p className="booking-card__appointment">
@@ -155,7 +163,7 @@ export function BookingCard({
         </a>
       )}
 
-      <Countdown cancelDeadline={cancelDeadline} serverTime={serverTime} depositLocked={escrowState === "locked"} />
+      {!declined && <Countdown cancelDeadline={cancelDeadline} serverTime={serverTime} depositLocked={escrowState === "locked"} />}
 
       {continueHref && (
         <Link to={continueHref} className="button-primary" style={{ textDecoration: "none", display: "inline-flex", marginTop: "var(--space-3)" }}>
@@ -191,6 +199,10 @@ export function BookingCard({
         onActionSubmitted={onActionSubmitted}
         onUnauthorized={onUnauthorized}
       />
+
+      {viewer === "provider" && canDecline && !declined && (
+        <DeclineHoldButton id={id} session={session} onDeclined={onActionSubmitted} onUnauthorized={onUnauthorized} />
+      )}
 
       {releaseMailto && (
         <a className="button-ghost" href={releaseMailto} style={{ marginTop: "var(--space-3)", textDecoration: "none", display: "inline-flex" }}>

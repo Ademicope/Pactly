@@ -7,6 +7,7 @@ import { useOwnProviderProfile, useProviderBookings } from "../../api/hooks";
 import { BookingActions } from "../../components/BookingActions";
 import { BookingCard, BALANCE_STATE_LABEL } from "../../components/BookingCard";
 import { Countdown } from "../../components/Countdown";
+import { DeclineHoldButton } from "../../components/DeclineHoldButton";
 import { PageMasthead } from "../../components/PageMasthead";
 import { StateLabel } from "../../components/StateLabel";
 import { TryAmount } from "../../components/TryAmount";
@@ -43,6 +44,11 @@ function ReleaseMailtoLink({
       Email the client
     </a>
   );
+}
+
+/** A shop can decline only a live hold that has not locked yet. */
+function canDeclineHold(booking: ProviderBookingListItem): boolean {
+  return booking.escrowState === null && booking.declinedAt === null && !booking.isExpiredHold;
 }
 
 /**
@@ -177,7 +183,7 @@ export function BookingsPage() {
                       )}
                     </td>
                     <td>
-                      <StateLabel lifecycle={booking.lifecycle} viewer="provider" />
+                      <StateLabel lifecycle={booking.lifecycle} viewer="provider" declined={booking.declinedAt !== null} />
                     </td>
                     <td>
                       <Countdown
@@ -216,6 +222,14 @@ export function BookingsPage() {
                         onActionSubmitted={() => bookingsQuery.refetch()}
                         onUnauthorized={handleSignOut}
                       />
+                      {canDeclineHold(booking) && (
+                        <DeclineHoldButton
+                          id={booking.id}
+                          session={session}
+                          onDeclined={() => bookingsQuery.refetch()}
+                          onUnauthorized={handleSignOut}
+                        />
+                      )}
                       <ReleaseMailtoLink
                         escrowState={booking.escrowState}
                         clientEmail={booking.clientEmail}
@@ -254,6 +268,8 @@ export function BookingsPage() {
                 onUnauthorized={handleSignOut}
                 clientEmail={booking.clientEmail}
                 shopName={shopName}
+                declinedAt={booking.declinedAt}
+                canDecline={canDeclineHold(booking)}
               />
             ))}
           </div>
@@ -287,6 +303,7 @@ export function BookingsPage() {
                 onUnauthorized={handleSignOut}
                 clientEmail={booking.clientEmail}
                 shopName={shopName}
+                declinedAt={booking.declinedAt}
               />
             ))}
           </div>

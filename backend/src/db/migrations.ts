@@ -359,6 +359,10 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "bookings", "provider_reminder_shown_at")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN provider_reminder_shown_at INTEGER`);
   }
+  // A shop can decline an unlocked hold on its own slot.
+  if (!hasColumn(sqlite, "bookings", "declined_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN declined_at INTEGER`);
+  }
   // Story 5.8: admin can hide categories from discovery and new applications.
   if (!hasColumn(sqlite, "categories", "visible")) {
     sqlite.exec(`ALTER TABLE categories ADD COLUMN visible INTEGER NOT NULL DEFAULT 1`);

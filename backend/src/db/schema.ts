@@ -373,6 +373,14 @@ export const bookings = sqliteTable("bookings", {
   /** Issue #35: UTC epoch seconds when client reminder was shown. Set once,
    * never cleared. When null and appointment is within 24h, reminder is
    * shown to client. */
+  /**
+   * UTC epoch seconds when the shop declined this hold (`declineHold`),
+   * `null` otherwise. Declining also moves `holdExpiresAt` into the past,
+   * so every "is this slot free" query frees the slot without knowing about
+   * this column; this column only tells a declined hold apart from one that
+   * simply timed out.
+   */
+  declinedAt: integer("declined_at"),
   clientReminderShownAt: integer("client_reminder_shown_at"),
   /** Issue #35: UTC epoch seconds when provider reminder was shown. Set once,
    * never cleared. When null and appointment is within 24h, reminder is
