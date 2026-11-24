@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api/client";
 import {
@@ -161,6 +161,13 @@ export function BookingActions({
   const [confirmingCash, setConfirmingCash] = useState(false);
   const [syncedAtMs, setSyncedAtMs] = useState(() => Date.now());
   const [, setTick] = useState(0);
+  const errorNoticeRef = useRef<HTMLParagraphElement | null>(null);
+
+  useEffect(() => {
+    if (notice?.alert) {
+      errorNoticeRef.current?.focus();
+    }
+  }, [notice]);
 
   useEffect(() => {
     setSyncedAtMs(Date.now());
@@ -428,6 +435,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
+              aria-label="Retry release"
               onClick={() =>
                 void runAction(
                   "release",
@@ -441,7 +449,13 @@ export function BookingActions({
           </div>
         )}
         {notice && (
-          <p className={`booking-card__notice${notice.alert ? " booking-card__notice--alert" : ""}`} aria-live="polite">
+          <p
+            ref={notice.alert ? errorNoticeRef : undefined}
+            className={`booking-card__notice${notice.alert ? " booking-card__notice--alert" : ""}`}
+            role={notice.alert ? "alert" : undefined}
+            aria-live={notice.alert ? "assertive" : "polite"}
+            tabIndex={notice.alert ? -1 : undefined}
+          >
             {notice.text}
           </p>
         )}
@@ -477,6 +491,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
+              aria-label="Mark appointment complete"
               onClick={() => void runAction("complete", () => completeAppointment(id, session!), "Marked complete. Waiting for it to confirm.")}
             >
               {busyAction === "complete" ? "Confirm with your passkey…" : "Mark appointment complete"}
@@ -487,6 +502,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
+              aria-label="Approve"
               onClick={() => void runAction("approve", () => approveAppointment(id, session!), "Approved. Waiting for it to confirm.")}
             >
               {busyAction === "approve" ? "Confirm with your passkey…" : "Approve"}
@@ -497,6 +513,7 @@ export function BookingActions({
               type="button"
               className="button-primary"
               disabled={isBusy}
+              aria-label="Release deposit"
               onClick={() => void runAction("release", () => releaseDeposit(id, session!), "Released. Waiting for it to confirm.")}
             >
               {busyAction === "release" ? "Confirm with your passkey…" : "Release deposit"}
@@ -509,6 +526,7 @@ export function BookingActions({
                   type="button"
                   className="button-ghost"
                   disabled={isBusy}
+                  aria-label="Cancel booking"
                   onClick={() =>
                     void pickDisputeReason(viewer === "client" ? "client-cancel" : "provider-cancel")
                   }
@@ -516,7 +534,7 @@ export function BookingActions({
                   {busyAction === "dispute" ? "Opening…" : "Cancel booking"}
                 </button>
               )}
-              <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setDisputeStep({ kind: "picking-reason" })}>
+              <button type="button" className="button-ghost" disabled={isBusy} aria-label="Open a dispute" onClick={() => setDisputeStep({ kind: "picking-reason" })}>
                 Open a dispute
               </button>
             </>
@@ -528,7 +546,7 @@ export function BookingActions({
         <div className="booking-card__balance-actions">
           <p className="booking-card__balance-note">{LOCAL_CURRENCY_UNAVAILABLE_NOTE}</p>
           <div className="booking-card__actions">
-            <button type="button" className="button-primary" disabled={isBusy} onClick={() => void handlePayBalance()}>
+            <button type="button" className="button-primary" disabled={isBusy} aria-label="Pay balance" onClick={() => void handlePayBalance()}>
               {busyAction === "pay-balance"
                 ? "Confirm with your passkey…"
                 : busyAction === "confirming-balance"
@@ -541,7 +559,7 @@ export function BookingActions({
 
       {canMarkCash && !confirmingCash && disputeStep.kind === "idle" && (
         <div className="booking-card__actions">
-          <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setConfirmingCash(true)}>
+          <button type="button" className="button-ghost" disabled={isBusy} aria-label="Mark paid in person" onClick={() => setConfirmingCash(true)}>
             Mark paid in person
           </button>
         </div>
@@ -551,10 +569,10 @@ export function BookingActions({
         <div className="booking-card__dispute-panel">
           <p>Confirm this client already paid the {formatTryAmount(balance.amount)} balance in person.</p>
           <div className="booking-card__actions">
-            <button type="button" className="button-primary" disabled={isBusy} onClick={() => void handleMarkCash()}>
+            <button type="button" className="button-primary" disabled={isBusy} aria-label="Confirm paid in person" onClick={() => void handleMarkCash()}>
               {busyAction === "mark-cash" ? "Saving…" : "Confirm, paid in person"}
             </button>
-            <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setConfirmingCash(false)}>
+            <button type="button" className="button-ghost" disabled={isBusy} aria-label="Cancel" onClick={() => setConfirmingCash(false)}>
               Never mind
             </button>
           </div>
@@ -566,11 +584,11 @@ export function BookingActions({
           <p>What's this about?</p>
           <div className="booking-card__actions">
             {DISPUTE_REASON_OPTIONS[viewer].map((option) => (
-              <button key={option.value} type="button" className="button-ghost" disabled={isBusy} onClick={() => void pickDisputeReason(option.value)}>
+              <button key={option.value} type="button" className="button-ghost" disabled={isBusy} aria-label={option.label} onClick={() => void pickDisputeReason(option.value)}>
                 {option.label}
               </button>
             ))}
-            <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setDisputeStep({ kind: "idle" })}>
+            <button type="button" className="button-ghost" disabled={isBusy} aria-label="Cancel" onClick={() => setDisputeStep({ kind: "idle" })}>
               Never mind
             </button>
           </div>
@@ -582,10 +600,10 @@ export function BookingActions({
           <p>{policyStatement(disputeStep.suggestedOutcome, formatTryAmount(deposit.amount), viewer)}</p>
           <p>This needs resolution. Pactly will resolve it as the named dispute resolver -- nothing moves until then.</p>
           <div className="booking-card__actions">
-            <button type="button" className="button-primary" disabled={isBusy} onClick={() => void confirmDispute()}>
+            <button type="button" className="button-primary" disabled={isBusy} aria-label="Confirm and open dispute" onClick={() => void confirmDispute()}>
               {busyAction === "dispute" ? "Confirm with your passkey…" : "Confirm and open dispute"}
             </button>
-            <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setDisputeStep({ kind: "idle" })}>
+            <button type="button" className="button-ghost" disabled={isBusy} aria-label="Cancel" onClick={() => setDisputeStep({ kind: "idle" })}>
               Never mind
             </button>
           </div>
@@ -593,7 +611,13 @@ export function BookingActions({
       )}
 
       {notice && (
-        <p className={`booking-card__notice${notice.alert ? " booking-card__notice--alert" : ""}`} aria-live="polite">
+        <p
+          ref={notice.alert ? errorNoticeRef : undefined}
+          className={`booking-card__notice${notice.alert ? " booking-card__notice--alert" : ""}`}
+          role={notice.alert ? "alert" : undefined}
+          aria-live={notice.alert ? "assertive" : "polite"}
+          tabIndex={notice.alert ? -1 : undefined}
+        >
           {notice.text}
         </p>
       )}
