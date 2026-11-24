@@ -648,6 +648,8 @@ export interface ProviderCardView {
   location: string;
   sessionFormat: string;
   sessionLengthMinutes: number;
+  /** Number of public services represented by the shortest card service. */
+  serviceCount: number;
   price: { amount: string; asset: string };
   deposit: { amount: string; asset: string };
   cancellationWindowHours: number;
@@ -675,6 +677,7 @@ export function buildProviderCardView(
     location: profile.location,
     sessionFormat: profile.sessionFormat,
     sessionLengthMinutes: profile.sessionLengthMinutes,
+    serviceCount: 1,
     price: { amount: profile.priceAmount, asset: ASSET },
     deposit: { amount: computeDepositAmount(profile.priceAmount, profile.depositRateBps), asset: ASSET },
     cancellationWindowHours: profile.cancellationWindowHours,

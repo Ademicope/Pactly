@@ -5,6 +5,7 @@ import { Link } from "react-router";
 import type { ProviderCard as ProviderCardData } from "../api/types";
 import { providerPhotoSrc } from "../lib/providerPhotos";
 import { formatSessionFormat } from "../lib/sessionFormat";
+import { providerCardDetails } from "../lib/providerCardDetails";
 import { DepositPill } from "./DepositPill";
 import { TryAmount } from "./TryAmount";
 
@@ -52,6 +53,16 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
   const photoSrc = providerPhotoSrc(provider.id);
   const firstSlot = provider.earliestSlots[0];
   const lockHref = firstSlot ? `/book/${provider.id}?slot=${firstSlot}` : `/providers/${provider.id}`;
+  const details = providerCardDetails({
+    sessionLengthMinutes: provider.sessionLengthMinutes,
+    serviceCount: provider.serviceCount,
+    priceAmount: provider.price?.amount,
+  });
+  const price = details.hasPrice ? (
+    <TryAmount amount={provider.price.amount} />
+  ) : (
+    <span>Price unset</span>
+  );
 
   const tile = photoSrc ? (
     <img src={photoSrc} alt="" />
@@ -88,7 +99,7 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
             </span>
             <span>
               <ClockIcon size={15} weight="fill" aria-hidden="true" />
-              {formatSessionFormat(provider.sessionFormat)} · {provider.sessionLengthMinutes} min
+              {formatSessionFormat(provider.sessionFormat)} · {details.lengthLabel}
             </span>
             {provider.verifiedSessionCount > 0 ? (
               <span>
@@ -100,7 +111,7 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
         </div>
         <div className="editorial-featured__side">
           <span className="editorial-card__price" style={{ fontSize: "var(--text-18)" }}>
-            <TryAmount amount={provider.price.amount} />
+            {price}
           </span>
           <DepositPill variant="row" amount={provider.deposit.amount} cancellationWindowHours={provider.cancellationWindowHours} />
           <Link to={lockHref} className="editorial-cta">
@@ -139,12 +150,16 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
         </span>
         <span>
           <ClockIcon size={13} aria-hidden="true" />
-          {provider.sessionLengthMinutes} min
+          {details.lengthLabel}
         </span>
       </div>
       <DepositPill variant="row" amount={provider.deposit.amount} cancellationWindowHours={provider.cancellationWindowHours} />
       <div className="editorial-card__foot">
-        <TryAmount amount={provider.price.amount} className="editorial-card__price" />
+        {details.hasPrice ? (
+          <TryAmount amount={provider.price.amount} className="editorial-card__price" />
+        ) : (
+          <span className="editorial-card__price">Price unset</span>
+        )}
         <Link to={lockHref} className="editorial-card__cta">
           {firstSlot ? "Lock" : "View"}
           <ArrowRightIcon size={14} weight="bold" aria-hidden="true" />
