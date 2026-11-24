@@ -547,19 +547,17 @@ export function useSubmitProviderApplication(session: Session | undefined) {
   });
 }
 
-/** Live deposit for the apply form -- the number on screen is whatever
- * this returns. Disabled until both price and rate look parseable; a
- * 400 from the server is a failed preview (caller blocks submit). */
-export function useApplicationDepositPreview(
-  session: Session | undefined,
-  input: DepositPreviewInput | undefined,
-) {
-  return useQuery({
-    queryKey: ["me", "provider", "application", "deposit-preview", session?.walletAddress, input?.priceAmount, input?.depositRateBps],
-    queryFn: () =>
-      apiPost<DepositPreviewResponse>("/me/provider/application/deposit-preview", input, session?.token),
-    enabled: Boolean(session && input?.priceAmount && Number.isInteger(input.depositRateBps)),
-    retry: false,
+export function useUpdateProviderApplication(session: Session | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ProviderApplicationInput) =>
+      apiPut<OwnProviderApplicationResponse>("/me/provider/application", input, session?.token),
+    onSuccess: (response) => {
+      queryClient.setQueryData(OWN_APPLICATION_KEY(session?.walletAddress), response.application);
+      // The same fields live on the unapproved profile; its cached view must
+      // reflect the correction (location included) without re-approving it.
+      void queryClient.invalidateQueries({ queryKey: OWN_PROVIDER_KEY(session?.walletAddress) });
+    },
   });
 }
 
