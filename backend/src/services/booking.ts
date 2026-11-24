@@ -55,6 +55,7 @@ import {
   getBookingById,
   getBookingsByIds,
   getActiveBookingForWalletAndSlot,
+  getExpiredHoldForWalletAndSlot,
   getReconcilableBookings,
   countPendingHoldsForWallet,
   insertBooking,
@@ -66,6 +67,8 @@ import {
   clearUnsubmittedEscrowContractId,
   markBalancePaidCashIfUnpaid,
   markBalancePaidPlatform,
+  markClientReminderShown,
+  markProviderReminderShown,
   recordDeploySubmission,
   recordProviderCancellationCountedSync,
   setEscrowActionSubmittedAt,
@@ -74,12 +77,14 @@ import {
   setEscrowFundTxHash,
   setPendingDispute,
   updateBalanceState,
+  updateClientEmail,
   updateEscrowContractId,
   updateEscrowStateIfNotTerminalSync,
   type BookingRow,
   type EscrowActionKind,
 } from "../db/bookings.js";
 import { getSlotById, getSlotByProviderAndStart } from "../db/availabilitySlots.js";
+import { isDateClosed, utcDateFor } from "../db/closedDates.js";
 import {
   isSlotInsideBufferAfterLocked,
   listLockedBookingStarts,
@@ -256,11 +261,16 @@ export interface HoldSlotInput {
   /** UTC epoch seconds -- must match one of the provider's own published
    * slots exactly. */
   slotStartsAt: number;
+  /** `true` only for an explicit "hold this slot again" action. Resume
+   * reads must not silently replace an expired hold. */
+  renewExpired?: boolean;
   /** The caller's own `Date.prototype.getTimezoneOffset()` value (minutes
    * to add to local time to reach UTC) -- used only to compute
    * `sameDaySlots`'s calendar-day window in the caller's own local day
    * rather than UTC. Omitted (or `0`) means UTC, the previous behavior. */
   tzOffsetMinutes?: number;
+  /** Optional client contact email for the shop's post-release mailto draft. */
+  clientEmail?: string | null;
 }
 
 export interface HoldSlotResult {
@@ -275,6 +285,9 @@ export interface HoldSlotResult {
    * `cancelDeadline`, never from the browser clock alone. */
   serverTime: number;
   provider: BookingProviderSummary;
+  /** Set when a resume read finds an expired, never-deployed hold rather
+   * than an active hold or a new hold. */
+  isExpiredHold?: true;
   /** `true` only when `cancelDeadline` has already passed at hold time --
    * the deposit is still locked as normal, but there is no free
    * cancellation window left to speak of. Omitted (never `false`) when it
@@ -333,6 +346,20 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   if (!slot || slot.startsAt <= now) {
     throw new SlotUnavailableError();
   }
+  // A one-off closure hides the slot from every list; refuse a direct post of
+  // a stale start time too. The slot row itself is left alone, so reopening
+  // the date makes it bookable again with no pattern edit.
+  if (await isDateClosed(db, profile.id, utcDateFor(slot.startsAt))) {
+    throw new SlotUnavailableError();
+  }
+
+  // Issue #36: a slot sooner than the shop's notice period cannot be held.
+  if (profile.minimumNoticeMinutes > 0) {
+    const minStartTime = now + profile.minimumNoticeMinutes * 60;
+    if (slot.startsAt < minStartTime) {
+      throw new SlotUnavailableError();
+    }
+  }
 
   // A slot inside the post-lock buffer is not offered -- refuse the hold the
   // same way as an unknown/past slot so a stale deep-link cannot claim it.
@@ -359,6 +386,9 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   // are all the same wallet asking for what it already has.
   const existing = await getActiveBookingForWalletAndSlot(db, slot.id, input.clientWalletAddress, now);
   if (existing) {
+    if (input.clientEmail !== undefined) {
+      await updateClientEmail(db, existing.id, input.clientEmail);
+    }
     return {
       bookingId: existing.id,
       holdExpiresAt: existing.holdExpiresAt ?? now,
@@ -370,6 +400,23 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
       provider,
       ...(existing.cancelDeadline <= now ? { freeCancellationEnded: true as const } : {}),
     };
+  }
+
+  if (!input.renewExpired) {
+    const expired = await getExpiredHoldForWalletAndSlot(db, slot.id, input.clientWalletAddress, now);
+    if (expired) {
+      return {
+        bookingId: expired.id,
+        holdExpiresAt: expired.holdExpiresAt ?? now,
+        deposit: { amount: expired.depositAmount, asset: ASSET },
+        balance: { amount: expired.balanceAmount, asset: ASSET },
+        price: { amount: (BigInt(expired.depositAmount) + BigInt(expired.balanceAmount)).toString(), asset: ASSET },
+        cancelDeadline: expired.cancelDeadline,
+        serverTime: now,
+        provider,
+        isExpiredHold: true,
+      };
+    }
   }
 
   // Review follow-up: cap pending (unlocked) holds per wallet so one wallet
@@ -392,6 +439,7 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
       id: bookingId,
       providerProfileId: profile.id,
       clientWalletAddress: input.clientWalletAddress,
+      clientEmail: input.clientEmail?.trim() || null,
       tokenAddress: usdc.contractId,
       depositAmount,
       balanceAmount,
@@ -520,16 +568,19 @@ async function requireProviderAddress(db: Db, booking: BookingRow): Promise<stri
 }
 
 /** Refuses {@link BookingHoldExpiredError} once `holdExpiresAt` has passed
- * (`<= now`, matching the exact boundary every other expiry check in this
- * codebase uses -- `insertBookingHoldIfSlotFree`'s own "active" definition
- * is `> now`, so a row exactly at `now` is expired, never both) with
- * `escrowState` still `null`. A `null` `holdExpiresAt` (a booking inserted
+ * (`< now` strictly past; exactly at `holdExpiresAt` is still active) with
+ * `escrowState` still `null` and no contract id. A `null` `holdExpiresAt` (a booking inserted
  * before Story 3.4, or through the plain `createBookingHold` helper) never
  * expires -- there is nothing to compare against. Once `escrowState` is set
  * the hold is moot (the deposit already reconciled), so this never fires
  * for a booking past that point either. */
 function requireHoldNotExpired(booking: BookingRow, now: number): void {
-  if (booking.escrowState === null && booking.holdExpiresAt !== null && booking.holdExpiresAt <= now) {
+  if (
+    booking.escrowState === null
+    && booking.escrowContractId === null
+    && booking.holdExpiresAt !== null
+    && booking.holdExpiresAt < now
+  ) {
     throw new BookingHoldExpiredError();
   }
 }
@@ -1516,10 +1567,9 @@ export interface BookingView {
    * no transaction to point at). Drives the balance row's own Stellar
    * Expert link, per the spec's own "Always" rule. */
   balancePaymentTxHash: string | null;
-  /** Issue #3: this booking's own review, once the client left one. `null`
-   * means "not reviewed" (or not reviewable yet), never a placeholder
-   * rating. */
-  review: ReviewView | null;
+  /** Issue #35: true when this read triggered showing a reminder (appointment
+   * day-before notice). False when already shown or conditions not met. */
+  reminderShown: boolean;
 }
 
 /** `GET /bookings/:id`'s own response shape: the booking's amounts (each
@@ -1528,7 +1578,10 @@ export interface BookingView {
  * provider profile, which could have changed its rules since), its
  * chain-derived lifecycle, and a small provider summary. The UI is told
  * `locked` only from here (`escrowState`), never from a submit response
- * (spec's own "Always" rule). */
+ * (spec's own "Always" rule).
+ *
+ * Issue #35: checks if a reminder should be shown and marks it. A reminder
+ * shows when the appointment is locked, within 24h, and not yet shown. */
 export async function getBookingView(
   db: Db,
   bookingId: string,
@@ -1540,7 +1593,23 @@ export async function getBookingView(
   const lifecycle = (await getEscrowLifecycle(db, bookingId)) ?? {};
   const slot = booking.slotId ? await getSlotById(db, booking.slotId) : undefined;
   const slotStartsAt = slot?.startsAt ?? null;
-  const review = await getReviewByBookingId(db, bookingId);
+
+  // Issue #35: check and mark reminder
+  let reminderShown = false;
+  const isLocked = booking.escrowState === "locked";
+  const hasSlot = slotStartsAt !== null;
+  const within24h = hasSlot && slotStartsAt - now <= 24 * 60 * 60 && slotStartsAt - now > 0;
+  const notCancelled = lifecycle.outcome !== "client-favored" && lifecycle.outcome !== "provider-favored";
+  const notDisputed = lifecycle.action !== "disputed";
+
+  if (isLocked && within24h && notCancelled && notDisputed) {
+    // Client is reading, check client reminder
+    if (booking.clientReminderShownAt === null) {
+      await markClientReminderShown(db, bookingId, now);
+      reminderShown = true;
+    }
+  }
+
   return {
     id: booking.id,
     escrowState: booking.escrowState,
@@ -1558,7 +1627,7 @@ export async function getBookingView(
       ? { id: profile.id, displayName: profile.displayName, title: profile.title }
       : { id: booking.providerProfileId, displayName: "", title: "" },
     balancePaymentTxHash: booking.balancePaymentTxHash,
-    review: review ? toReviewView(review) : null,
+    reminderShown,
   };
 }
 
@@ -1816,6 +1885,8 @@ export interface BookingListItemBase {
   serverTime: number;
   contractId: string | null;
   holdExpiresAt: number | null;
+  /** Issue #35: true when this read triggered showing a reminder. */
+  reminderShown: boolean;
   /** The AD-13 hold's own 10-minute window has passed with `escrowState`
    * still `null` -- the spec's own "Always" rule: "An expired, never-funded
    * hold is listed under 'Expired holds' (collapsed), never as a booking."
@@ -1837,10 +1908,17 @@ export interface ProviderBookingListItem extends BookingListItemBase {
    * uses), never truncated here (this backend never invents a display
    * format; see `lib/money.ts`'s own equivalent discipline for amounts). */
   clientWalletAddress: string;
+  /** Optional client contact email for the shop's post-release mailto draft. */
+  clientEmail: string | null;
 }
 
 function isExpiredHoldRow(booking: BookingRow, now: number): boolean {
-  return booking.escrowState === null && booking.holdExpiresAt !== null && booking.holdExpiresAt < now;
+  return (
+    booking.escrowState === null
+    && booking.escrowContractId === null
+    && booking.holdExpiresAt !== null
+    && booking.holdExpiresAt < now
+  );
 }
 
 /** Upcoming appointments first, soonest first; then past ones, most recent
@@ -1862,7 +1940,7 @@ function toBookingListItemBase(
   slotStartsAt: number | null,
   lifecycle: EscrowLifecycle | undefined,
   now: number,
-  review: ReviewView | undefined,
+  reminderShown: boolean = false,
 ): BookingListItemBase {
   return {
     id: booking.id,
@@ -1879,6 +1957,7 @@ function toBookingListItemBase(
     serverTime: now,
     contractId: booking.escrowContractId,
     holdExpiresAt: booking.holdExpiresAt,
+    reminderShown,
     isExpiredHold: isExpiredHoldRow(booking, now),
     review: review ? toReviewView(review) : null,
   };
@@ -1891,6 +1970,8 @@ function toBookingListItemBase(
  * {@link listBookingRowsForClient}'s own `WHERE client_wallet_address = ?`
  * -- this function never filters by anything else, so another wallet's rows
  * can never leak in here.
+ * 
+ * Issue #35: checks and marks client reminders for qualifying bookings.
  */
 export async function listBookingsForClient(
   db: Db,
@@ -1912,10 +1993,26 @@ export async function listBookingsForClient(
   const profiles = await Promise.all(providerIds.map((id) => getProviderProfileById(db, id)));
   const profileById = new Map(profiles.filter((profile): profile is NonNullable<typeof profile> => Boolean(profile)).map((profile) => [profile.id, profile]));
 
+  // Issue #35: check and mark client reminders
+  const remindersShown = new Set<string>();
+  for (const { booking, slotStartsAt } of rows) {
+    const lifecycle = lifecycleByBooking.get(booking.id);
+    const isLocked = booking.escrowState === "locked";
+    const hasSlot = slotStartsAt !== null;
+    const within24h = hasSlot && slotStartsAt - now <= 24 * 60 * 60 && slotStartsAt - now > 0;
+    const notCancelled = lifecycle?.outcome !== "client-favored" && lifecycle?.outcome !== "provider-favored";
+    const notDisputed = lifecycle?.action !== "disputed";
+
+    if (isLocked && within24h && notCancelled && notDisputed && booking.clientReminderShownAt === null) {
+      await markClientReminderShown(db, booking.id, now);
+      remindersShown.add(booking.id);
+    }
+  }
+
   const items: ClientBookingListItem[] = rows.map(({ booking, slotStartsAt }) => {
     const profile = profileById.get(booking.providerProfileId);
     return {
-      ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now, reviewByBooking.get(booking.id)),
+      ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now, remindersShown.has(booking.id)),
       provider: profile
         ? { id: profile.id, displayName: profile.displayName, title: profile.title }
         : { id: booking.providerProfileId, displayName: "", title: "" },
@@ -1932,6 +2029,8 @@ export async function listBookingsForClient(
  * already follows), so another provider's bookings can never be requested
  * through this function at all. Refuses {@link NotAProviderError} for a
  * wallet with no provider profile.
+ * 
+ * Issue #35: checks and marks provider reminders for qualifying bookings.
  */
 export async function listBookingsForProvider(
   db: Db,
@@ -1950,13 +2049,26 @@ export async function listBookingsForProvider(
     rows.map((row) => row.booking),
   );
 
-  const reviewByBooking = await getReviewsForBookings(
-    db,
-    rows.map((row) => row.booking.id),
-  );
+  // Issue #35: check and mark provider reminders
+  const remindersShown = new Set<string>();
+  for (const { booking, slotStartsAt } of rows) {
+    const lifecycle = lifecycleByBooking.get(booking.id);
+    const isLocked = booking.escrowState === "locked";
+    const hasSlot = slotStartsAt !== null;
+    const within24h = hasSlot && slotStartsAt - now <= 24 * 60 * 60 && slotStartsAt - now > 0;
+    const notCancelled = lifecycle?.outcome !== "client-favored" && lifecycle?.outcome !== "provider-favored";
+    const notDisputed = lifecycle?.action !== "disputed";
+
+    if (isLocked && within24h && notCancelled && notDisputed && booking.providerReminderShownAt === null) {
+      await markProviderReminderShown(db, booking.id, now);
+      remindersShown.add(booking.id);
+    }
+  }
+
   const items: ProviderBookingListItem[] = rows.map(({ booking, slotStartsAt }) => ({
-    ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now, reviewByBooking.get(booking.id)),
+    ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now, remindersShown.has(booking.id)),
     clientWalletAddress: booking.clientWalletAddress,
+    clientEmail: booking.clientEmail ?? null,
   }));
   items.sort((a, b) => compareByAppointmentDate(a, b, now));
   return items;

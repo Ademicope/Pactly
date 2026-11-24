@@ -24,6 +24,10 @@ export interface ProviderProfile {
   id: string;
   displayName: string;
   title: string;
+  /** The shop's description -- editable by an approved provider. */
+  bio: string;
+  /** Language names/codes, decoded from the backend's JSON column. */
+  languages: string[];
   category: Category;
   location: string;
   sessionFormat: string;
@@ -150,6 +154,9 @@ export interface HoldSlotResponse {
   /** `true` only when the free-cancellation window had already passed at
    * the moment of the hold -- omitted (never `false`) otherwise. */
   freeCancellationEnded?: boolean;
+  /** `true` only when a resume read found an expired, never-deployed hold.
+   * The UI clears the hold and offers an explicit re-hold action. */
+  isExpiredHold?: true;
 }
 
 /** Review follow-up: `deployed: true` means a signed deploy was already
@@ -255,6 +262,8 @@ export interface ProviderBookingListItem extends BookingListItemBase {
   /** Full wallet address -- shortened only at render time (`lib/stellar.ts`'s
    * `shortenStellarId`, the same helper `EscrowProof` already uses). */
   clientWalletAddress: string;
+  /** Optional client contact email for the shop's post-release mailto draft. */
+  clientEmail: string | null;
 }
 
 export interface MyBookingsResponse {
@@ -373,6 +382,11 @@ export interface QuoteResponse {
   };
   /** UTC epoch seconds. */
   quotedAt: number;
+  /** How long the anchor honours the quote, in seconds (60 when it did not
+   * state an age). A screen older than this must refresh before confirming. */
+  maxAgeSeconds: number;
+  /** UTC epoch seconds at which the quote stops being honoured. */
+  expiresAt: number;
   spreadApplied: true;
 }
 

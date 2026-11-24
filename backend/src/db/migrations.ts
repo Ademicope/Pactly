@@ -16,7 +16,8 @@ const STATEMENTS: readonly string[] = [
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
-    parent_category_id TEXT
+    parent_category_id TEXT,
+    visible INTEGER NOT NULL DEFAULT 1
   )`,
   `CREATE TABLE IF NOT EXISTS provider_applications (
     id TEXT PRIMARY KEY,
@@ -60,6 +61,14 @@ const STATEMENTS: readonly string[] = [
     withdrawn_at INTEGER,
     created_at INTEGER NOT NULL,
     UNIQUE (provider_profile_id, starts_at)
+  )`,
+  // One-off closures: a closed day is its own row, so the provider's
+  // repeating slot pattern is never rewritten to take a day off.
+  `CREATE TABLE IF NOT EXISTS provider_closed_dates (
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    date TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (provider_profile_id, date)
   )`,
   `CREATE TABLE IF NOT EXISTS bookings (
     id TEXT PRIMARY KEY,
@@ -241,6 +250,10 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "provider_profiles", "location")) {
     sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN location TEXT NOT NULL DEFAULT ''`);
   }
+  // Issue #36: minimum notice minutes (0-7 days)
+  if (!hasColumn(sqlite, "provider_profiles", "minimum_notice_minutes")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN minimum_notice_minutes INTEGER NOT NULL DEFAULT 0`);
+  }
   // Story 3.4: the AD-13 slot hold's own columns -- nullable, since a
   // database created before this story has `bookings` rows that never had a
   // slot or a hold expiry (and never will retroactively).
@@ -355,17 +368,21 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "bookings", "anchor_trustline_tx_hash")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN anchor_trustline_tx_hash TEXT`);
   }
-
-  // Issue #2: once-only markers for the two trust counters. A database
-  // created before this story has existing bookings, so both are nullable
-  // and stay null until their own event is first observed.
-  if (!hasColumn(sqlite, "bookings", "verified_session_counted_at")) {
-    sqlite.exec(`ALTER TABLE bookings ADD COLUMN verified_session_counted_at INTEGER`);
+  // Optional client email for the shop's post-release mailto draft (#47).
+  if (!hasColumn(sqlite, "bookings", "client_email")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN client_email TEXT`);
   }
-  if (!hasColumn(sqlite, "bookings", "provider_cancellation_counted_at")) {
-    sqlite.exec(`ALTER TABLE bookings ADD COLUMN provider_cancellation_counted_at INTEGER`);
+  // Issue #35: appointment reminders
+  if (!hasColumn(sqlite, "bookings", "client_reminder_shown_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN client_reminder_shown_at INTEGER`);
   }
-  sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_cash_outs_provider ON cash_outs(provider_wallet_address)`);
+  if (!hasColumn(sqlite, "bookings", "provider_reminder_shown_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN provider_reminder_shown_at INTEGER`);
+  }
+  // Story 5.8: admin can hide categories from discovery and new applications.
+  if (!hasColumn(sqlite, "categories", "visible")) {
+    sqlite.exec(`ALTER TABLE categories ADD COLUMN visible INTEGER NOT NULL DEFAULT 1`);
+  }
   // Appointment buffer: minutes kept free after a locked booking before
   // another slot is offered. Default 0 keeps adjacent slots (existing rows).
   if (!hasColumn(sqlite, "provider_profiles", "buffer_minutes")) {

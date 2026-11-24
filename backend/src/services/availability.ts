@@ -1,8 +1,19 @@
 /**
- * Appointment buffer: after a locked booking ends, keep `bufferMinutes`
- * free before another slot of the same shop is offered. Weekly hours and
- * existing locked bookings are never rewritten here -- this module only
- * filters what clients are shown (and what `holdSlot` may claim).
+ * Availability services: one-off closures as an overlay on a provider's
+ * repeating slot pattern, and the appointment buffer that keeps a gap after
+ * a locked booking.
+ *
+ * A single day off must not mean deleting that day's slots and rebuilding
+ * them next week, so a closure hides a *calendar date*; the slot rows stay
+ * exactly where they are and reopening the date reveals them again. Nothing
+ * here touches bookings: a date holding a locked booking is refused outright
+ * (with the booking's id, so the panel can name it) rather than silently
+ * cancelling anyone's appointment.
+ *
+ * After a locked booking ends, `bufferMinutes` stay free before another
+ * slot of the same shop is offered. Weekly hours and existing locked
+ * bookings are never rewritten here -- this module only filters what clients
+ * are shown (and what `holdSlot` may claim).
  */
 import { and, eq } from "drizzle-orm";
 
@@ -14,6 +25,106 @@ import {
   listOpenSlotsInRange,
   type ListFutureSlotsOptions,
 } from "../db/availabilitySlots.js";
+import {
+  isValidClosedDate,
+  insertClosedDate,
+  deleteClosedDate,
+  isDateClosed,
+  listClosedDates,
+  listLockedBookingsOnDate,
+} from "../db/closedDates.js";
+import { getProviderProfileByWallet } from "../db/providerProfiles.js";
+import { NotAProviderError } from "./profile.js";
+
+export { NotAProviderError };
+
+export class InvalidClosedDateError extends Error {
+  readonly details: Record<string, string>;
+  constructor(date: unknown) {
+    super("Use a calendar date in YYYY-MM-DD form.");
+    this.name = "InvalidClosedDateError";
+    this.details = { date: `Invalid date "${String(date)}": use YYYY-MM-DD.` };
+  }
+}
+
+export class ClosedDateBookingError extends Error {
+  /** The booking the panel names in its error message. */
+  readonly bookingId: string;
+  readonly slotStartsAt: number;
+  readonly escrowState: string;
+  constructor(booking: { bookingId: string; slotStartsAt: number; escrowState: string }) {
+    super(`This date has a locked booking (${booking.bookingId}). It can't be closed.`);
+    this.name = "ClosedDateBookingError";
+    this.bookingId = booking.bookingId;
+    this.slotStartsAt = booking.slotStartsAt;
+    this.escrowState = booking.escrowState;
+  }
+}
+
+async function ownProviderId(db: Db, walletAddress: string): Promise<string> {
+  const profile = await getProviderProfileByWallet(db, walletAddress);
+  if (!profile) {
+    throw new NotAProviderError();
+  }
+  return profile.id;
+}
+
+/**
+ * Closes one UTC calendar date for the caller's own shop. Duplicate closes
+ * are a no-op (the insert is `ON CONFLICT DO NOTHING`). Returns the full,
+ * sorted list of the shop's closed dates, including this one.
+ */
+export async function closeDate(
+  db: Db,
+  walletAddress: string,
+  date: unknown,
+  now: number = Date.now(),
+): Promise<string[]> {
+  if (!isValidClosedDate(date)) {
+    throw new InvalidClosedDateError(date);
+  }
+  const providerProfileId = await ownProviderId(db, walletAddress);
+  // A retry of an already-closed date changes nothing at all -- not even an
+  // error about a booking that locked after the closure was first made.
+  if (await isDateClosed(db, providerProfileId, date)) {
+    return listClosedDates(db, providerProfileId);
+  }
+  const locked = await listLockedBookingsOnDate(db, providerProfileId, date);
+  if (locked.length > 0) {
+    // Name a concrete booking so the panel can point at it -- closing the
+    // date would be a destructive act against a real appointment.
+    throw new ClosedDateBookingError(locked[0]!);
+  }
+  await insertClosedDate(db, providerProfileId, date, now);
+  return listClosedDates(db, providerProfileId);
+}
+
+/** Alias named for the shop-facing wording. */
+export const closeProviderDate = closeDate;
+export const closeAvailabilityDate = closeDate;
+
+/** Removes a closure. Removing a date that was never closed is a no-op. */
+export async function reopenDate(db: Db, walletAddress: string, date: unknown): Promise<string[]> {
+  if (!isValidClosedDate(date)) {
+    throw new InvalidClosedDateError(date);
+  }
+  const providerProfileId = await ownProviderId(db, walletAddress);
+  await deleteClosedDate(db, providerProfileId, date);
+  return listClosedDates(db, providerProfileId);
+}
+
+export const reopenProviderDate = reopenDate;
+export const openDate = reopenDate;
+/** Panel wording: a closed date is a blocked date, not a deleted slot. */
+export const blockDate = closeDate;
+export const unblockDate = reopenDate;
+export const setDateClosed = closeDate;
+
+/** Every closed UTC date for the caller's shop, ascending. */
+export async function listClosedDatesForWallet(db: Db, walletAddress: string): Promise<string[]> {
+  const providerProfileId = await ownProviderId(db, walletAddress);
+  return listClosedDates(db, providerProfileId);
+}
 
 /** True when `slotStartsAt` falls in the half-open window
  * `[sessionEnd, sessionEnd + buffer)` after a locked booking that started

@@ -17,12 +17,18 @@
 import { sqliteTable, text, integer, primaryKey, unique } from "drizzle-orm/sqlite-core";
 
 /** Initial set: therapy and wellbeing, education and lessons, consulting,
- * fitness and beauty (PRD Data Model Additions). */
+ * fitness and beauty (PRD Data Model Additions). Story 5.8: admin can hide
+ * a category from discovery and new applications while keeping existing
+ * shops readable. */
 export const categories = sqliteTable("categories", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   slug: text("slug").notNull().unique(),
   parentCategoryId: text("parent_category_id"),
+  /** Story 5.8: false when hidden by admin. Defaults to true for seeded
+   * categories. Hidden categories don't appear in discovery or the apply
+   * form. */
+  visible: integer("visible", { mode: "boolean" }).notNull().default(true),
 });
 
 export const PROVIDER_APPLICATION_STATES = ["pending", "approved", "rejected"] as const;
@@ -79,6 +85,10 @@ export const providerProfiles = sqliteTable("provider_profiles", {
   priceAmount: text("price_amount").notNull(),
   depositRateBps: integer("deposit_rate_bps").notNull(),
   cancellationWindowHours: integer("cancellation_window_hours").notNull(),
+  /** Issue #36: minimum notice in minutes (0-10080, i.e. 0-7 days). Slots
+   * sooner than this are not offered/held. Zero means immediate booking.
+   * Defaults to 0 for profiles created before this field. */
+  minimumNoticeMinutes: integer("minimum_notice_minutes").notNull().default(0),
   /** Minutes kept free after a locked booking before another slot may be
    * offered (0-120). Does not change weekly hours or move existing locks. */
   bufferMinutes: integer("buffer_minutes").notNull().default(0),
@@ -127,6 +137,27 @@ export const availabilitySlots = sqliteTable(
   (table) => [unique().on(table.providerProfileId, table.startsAt)],
 );
 
+/**
+ * Story (one-off closures): a provider's closed calendar dates. A closure is
+ * deliberately a row of its own rather than a rewrite of `availability_slots`:
+ * the shop's weekly/ repeating pattern stays exactly as it was, and only the
+ * closed day stops offering slots. `date` is the UTC calendar day in
+ * `YYYY-MM-DD` form, derived from a slot's `starts_at` with SQLite's
+ * `unixepoch`/`strftime` so the same date a client picked is the one filtered
+ * out everywhere slots are read. Closing a date never touches a booking.
+ */
+export const providerClosedDates = sqliteTable(
+  "provider_closed_dates",
+  {
+    providerProfileId: text("provider_profile_id")
+      .notNull()
+      .references(() => providerProfiles.id),
+    date: text("date").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.providerProfileId, table.date] })],
+);
+
 /** Booking states the contract can never produce. `escrowState` is `null`
  * until the event worker processes the booking's first event -- the row is
  * written before the chain call (AD-13's hold), so it exists before any
@@ -168,6 +199,9 @@ export const bookings = sqliteTable("bookings", {
     .notNull()
     .references(() => providerProfiles.id),
   clientWalletAddress: text("client_wallet_address").notNull(),
+  /** Optional client contact email for post-release shop mailto drafts.
+   * Never required for booking; never shown on the public proof page. */
+  clientEmail: text("client_email"),
   /** The token contract the deposit is denominated in (C... or G...). */
   tokenAddress: text("token_address").notNull(),
   /** Integer string, smallest unit (AD-7); the amount locked on chain. */
@@ -352,6 +386,15 @@ export const bookings = sqliteTable("bookings", {
    * count -- set when a dispute whose reason is `provider-cancel` is first
    * recorded. A client's cancelling never sets it. */
   providerCancellationCountedAt: integer("provider_cancellation_counted_at"),
+
+  /** Issue #35: UTC epoch seconds when client reminder was shown. Set once,
+   * never cleared. When null and appointment is within 24h, reminder is
+   * shown to client. */
+  clientReminderShownAt: integer("client_reminder_shown_at"),
+  /** Issue #35: UTC epoch seconds when provider reminder was shown. Set once,
+   * never cleared. When null and appointment is within 24h, reminder is
+   * shown to provider. */
+  providerReminderShownAt: integer("provider_reminder_shown_at"),
 
   createdAt: integer("created_at").notNull(),
 });
