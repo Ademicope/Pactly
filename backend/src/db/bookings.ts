@@ -26,6 +26,8 @@ export interface NewBooking {
   id: string;
   providerProfileId: string;
   clientWalletAddress: string;
+  /** Optional client contact email for post-release mailto drafts. */
+  clientEmail?: string | null;
   tokenAddress: string;
   depositAmount: string;
   balanceAmount?: string;
@@ -58,6 +60,7 @@ export async function insertBooking(db: Db, values: NewBooking): Promise<void> {
     id: values.id,
     providerProfileId: values.providerProfileId,
     clientWalletAddress: values.clientWalletAddress,
+    clientEmail: values.clientEmail ?? null,
     tokenAddress: values.tokenAddress,
     depositAmount: values.depositAmount,
     balanceAmount: values.balanceAmount ?? "0",
@@ -75,7 +78,7 @@ export async function insertBooking(db: Db, values: NewBooking): Promise<void> {
  * booking" (the spec's own "Always" rule) is enforced by SQLite itself, in
  * one atomic statement, never by a separate JS-level check-then-insert that
  * a second concurrent caller could interleave with. "Active" means a
- * non-expired hold (`hold_expires_at > now`) or a booking whose
+ * non-expired hold (`hold_expires_at >= now`) or a booking whose
  * `escrow_state` is already non-null (a locked/released/refunded booking
  * never frees its slot merely because its own hold's clock ran out).
  *
@@ -91,12 +94,12 @@ export async function insertBookingHoldIfSlotFree(
 ): Promise<boolean> {
   const result = db.run(sql`
     INSERT INTO bookings (
-      id, provider_profile_id, client_wallet_address, token_address,
+      id, provider_profile_id, client_wallet_address, client_email, token_address,
       deposit_amount, balance_amount, cancel_deadline, slot_id, hold_expires_at,
       balance_state, created_at
     )
     SELECT
-      ${values.id}, ${values.providerProfileId}, ${values.clientWalletAddress}, ${values.tokenAddress},
+      ${values.id}, ${values.providerProfileId}, ${values.clientWalletAddress}, ${values.clientEmail ?? null}, ${values.tokenAddress},
       ${values.depositAmount}, ${values.balanceAmount ?? "0"}, ${values.cancelDeadline}, ${values.slotId}, ${values.holdExpiresAt},
       ${values.balanceState ?? "unpaid"}, ${values.createdAt}
     WHERE NOT EXISTS (
@@ -104,7 +107,7 @@ export async function insertBookingHoldIfSlotFree(
       WHERE existing.slot_id = ${values.slotId}
         AND (
           (existing.escrow_state IS NOT NULL AND existing.escrow_state != 'refunded')
-          OR (existing.escrow_state IS NULL AND existing.hold_expires_at > ${now})
+          OR (existing.escrow_state IS NULL AND existing.hold_expires_at >= ${now})
         )
     )
   `);
@@ -131,8 +134,34 @@ export async function getActiveBookingForWalletAndSlot(
         eq(bookings.clientWalletAddress, clientWalletAddress),
         or(
           and(isNotNull(bookings.escrowState), ne(bookings.escrowState, "refunded")),
-          and(isNull(bookings.escrowState), gt(bookings.holdExpiresAt, now)),
+          and(isNull(bookings.escrowState), gte(bookings.holdExpiresAt, now)),
         ),
+      ),
+    )
+    .limit(1);
+  return rows[0];
+}
+
+/** Finds the original, never-deployed hold for one wallet and slot. A hold
+ * is expired only while `escrowState` is null, `escrowContractId` is null,
+ * and `holdExpiresAt` is strictly before `now`. Exactly at the boundary
+ * the hold remains active. */
+export async function getExpiredHoldForWalletAndSlot(
+  db: Db,
+  slotId: string,
+  clientWalletAddress: string,
+  now: number,
+): Promise<BookingRow | undefined> {
+  const rows = await db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.slotId, slotId),
+        eq(bookings.clientWalletAddress, clientWalletAddress),
+        isNull(bookings.escrowState),
+        isNull(bookings.escrowContractId),
+        lt(bookings.holdExpiresAt, now),
       ),
     )
     .limit(1);
@@ -150,7 +179,7 @@ export async function countPendingHoldsForWallet(db: Db, clientWalletAddress: st
   const rows = await db
     .select({ id: bookings.id })
     .from(bookings)
-    .where(and(eq(bookings.clientWalletAddress, clientWalletAddress), isNull(bookings.escrowState), gt(bookings.holdExpiresAt, now)));
+    .where(and(eq(bookings.clientWalletAddress, clientWalletAddress), isNull(bookings.escrowState), gte(bookings.holdExpiresAt, now)));
   return rows.length;
 }
 
@@ -286,6 +315,13 @@ export function updateEscrowStateSync(db: DbOrTx, id: string, escrowState: Escro
  * `balanceState`, which is a different owner's column (AD-3). */
 export async function updateEscrowState(db: Db, id: string, escrowState: EscrowState): Promise<void> {
   updateEscrowStateSync(db, id, escrowState);
+}
+
+/** Stores an optional client contact email for post-release mailto drafts.
+ * Empty / whitespace clears the field back to null. */
+export async function updateClientEmail(db: Db, id: string, clientEmail: string | null): Promise<void> {
+  const trimmed = clientEmail?.trim() || null;
+  await db.update(bookings).set({ clientEmail: trimmed }).where(eq(bookings.id, id));
 }
 
 /** Same as {@link updateEscrowStateSync}, except the write itself is
@@ -607,14 +643,14 @@ export function listPotentialDoubleSales(db: Db, now: number): PotentialDoubleSa
       AND b.escrow_contract_id IS NOT NULL
       AND b.slot_id IS NOT NULL
       AND b.hold_expires_at IS NOT NULL
-      AND b.hold_expires_at <= ${now}
+      AND b.hold_expires_at < ${now}
       AND EXISTS (
         SELECT 1 FROM bookings other
         WHERE other.slot_id = b.slot_id
           AND other.id != b.id
           AND (
             (other.escrow_state IS NOT NULL AND other.escrow_state != 'refunded')
-            OR (other.escrow_state IS NULL AND other.hold_expires_at > ${now})
+            OR (other.escrow_state IS NULL AND other.hold_expires_at >= ${now})
           )
       )
   `);
@@ -649,7 +685,7 @@ export function listConflictingSlotBookings(db: Db, now: number): ConflictingBoo
       AND b1.escrow_state != 'refunded'
       AND (
         (b2.escrow_state IS NOT NULL AND b2.escrow_state != 'refunded')
-        OR (b2.escrow_state IS NULL AND b2.hold_expires_at > ${now})
+        OR (b2.escrow_state IS NULL AND b2.hold_expires_at >= ${now})
       )
   `);
   return rows.map((row) => ({ slotId: row.slot_id, bookingIdA: row.booking_a, bookingIdB: row.booking_b }));
@@ -771,4 +807,16 @@ export async function extendHoldExpiresAt(db: Db, bookingId: string, holdExpires
 
 export async function setAnchorTrustlineTxHash(db: Db, bookingId: string, txHash: string): Promise<void> {
   await db.update(bookings).set({ anchorTrustlineTxHash: txHash }).where(eq(bookings.id, bookingId));
+}
+
+/** Issue #35: marks client reminder as shown at the given timestamp. Once set,
+ * never cleared, so a booking only shows its client reminder once. */
+export async function markClientReminderShown(db: Db, bookingId: string, shownAt: number): Promise<void> {
+  await db.update(bookings).set({ clientReminderShownAt: shownAt }).where(eq(bookings.id, bookingId));
+}
+
+/** Issue #35: marks provider reminder as shown at the given timestamp. Once set,
+ * never cleared, so a booking only shows its provider reminder once. */
+export async function markProviderReminderShown(db: Db, bookingId: string, shownAt: number): Promise<void> {
+  await db.update(bookings).set({ providerReminderShownAt: shownAt }).where(eq(bookings.id, bookingId));
 }

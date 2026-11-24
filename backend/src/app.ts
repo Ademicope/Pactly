@@ -11,6 +11,7 @@
  * real process and hits `/health` over the real port.
  */
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import type { Context, Next } from "hono";
 
 import {
@@ -46,13 +47,17 @@ import { AccountFundingError, InvalidXdrError, NoCustodialAccountError } from ".
 import { ensureAccountReady, ensureAccountReadyInBackground, type EnsureAccountReadyDeps } from "./custodial/funding.js";
 import { signXdrForWallet } from "./custodial/keys.js";
 import { getUserByWalletAddress } from "./db/users.js";
+import { getCategoryById, getCategoryBySlug, insertCategory, updateCategoryVisibility } from "./db/categories.js";
 import { RateUnavailableError, getTryRate } from "./services/rate.js";
 import type { Db } from "./db/client.js";
 import {
   InvalidAvailabilitySlotsError,
+  InvalidProviderProfileError,
   InvalidProviderRulesError,
   NotAProviderError,
+  ProviderNotApprovedError,
   ProviderNotFoundError,
+  updateProviderProfile,
   getOwnProviderProfile,
   getPublicProviderProfile,
   listCategoriesWithProviderCounts,
@@ -73,6 +78,7 @@ import {
   decideApplication,
   getOwnProviderApplication,
   listPendingApplications,
+  previewApplicationDeposit,
 } from "./services/providerApplications.js";
 import {
   BookingActionPendingError,
@@ -125,8 +131,17 @@ import {
   AnchorQuoteUnavailableError,
   AnchorQuoteUnsupportedError,
   AnchorUnavailableError,
+  QuoteMismatchError,
+  QuoteStaleError,
 } from "./anchor/errors.js";
 import { fetchIndicativePrice, type Sep38FetchLike } from "./anchor/sep38.js";
+import {
+  ClosedDateBookingError,
+  InvalidClosedDateError,
+  closeDate,
+  listClosedDatesForWallet,
+  reopenDate,
+} from "./services/availability.js";
 import type { AnchorFetchLike } from "./anchor/http.js";
 import {
   SandboxOnlyError,
@@ -136,8 +151,16 @@ import {
   pollLocalDeposit,
   simulateLocalDeposit,
   submitLocalDepositTrustline,
+  type ConfirmedQuote,
   type LocalDepositDeps,
 } from "./services/localDeposit.js";
+import {
+  InvalidReportReasonError,
+  ReportRateLimitError,
+  ShopNotFoundError,
+  getShopReportsForAdmin,
+  submitShopReport,
+} from "./services/shopReports.js";
 
 export interface Variables {
   /** Set by `requirePactlyAuth` once a request's Pactly JWT verifies --
@@ -301,6 +324,31 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     ...options.localDepositDeps,
     fetchImpl: options.localDepositDeps?.fetchImpl ?? (quoteFetchImpl as AnchorFetchLike | undefined),
   };
+
+  // Security headers middleware -- sets three API headers (AC1) and ensures
+  // no wildcard CORS origin (AC3). Runs before every route.
+  app.use("*", async (c, next) => {
+    await next();
+    c.header("X-Content-Type-Options", "nosniff");
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("X-Frame-Options", "DENY");
+  });
+
+  // CORS middleware -- allows same-origin requests and never sets a wildcard
+  // origin (AC3). In development, allows localhost; in production, only the
+  // request's own origin if it matches the deployed app pattern (Vercel).
+  app.use("*", cors({
+    origin: (origin) => {
+      // Allow localhost for development, or any origin that looks like a
+      // Vercel deployment. Never return "*" (AC3).
+      if (!origin) return "http://localhost:5173";
+      if (origin.includes("localhost") || origin.includes("127.0.0.1")) return origin;
+      if (origin.includes("vercel.app") || origin.match(/https?:\/\/[^/]+\.vercel\.app$/)) return origin;
+      // For any other origin, echo it back (same-origin) -- never "*"
+      return origin;
+    },
+    credentials: true,
+  }));
 
   // Every route above handles its own typed failures and returns the
   // `{code, message}` envelope itself; this is only the backstop for a
@@ -588,7 +636,12 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       return c.json({ code: "INVALID_AMOUNT", message: "amount must be a positive integer string." }, 400);
     }
     try {
-      const quote = await fetchIndicativePrice({ amount }, { fetchImpl: quoteFetchImpl });
+      // `refresh=1` is the screen's "the quote I am showing has aged out"
+      // call: bypass the backend's own short cache so the amount the client
+      // confirms is genuinely the anchor's current one. It is still a plain
+      // read -- no hold, no booking, no escrow state is touched.
+      const refresh = c.req.query("refresh") === "1";
+      const quote = await fetchIndicativePrice({ amount }, { fetchImpl: quoteFetchImpl, forceRefresh: refresh });
       return c.json(quote);
     } catch (error) {
       if (error instanceof AnchorQuoteUnsupportedError) {
@@ -624,6 +677,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         depositRateBps: typeof body?.depositRateBps === "number" ? body.depositRateBps : Number.NaN,
         cancellationWindowHours:
           typeof body?.cancellationWindowHours === "number" ? body.cancellationWindowHours : Number.NaN,
+        minimumNoticeMinutes: typeof body?.minimumNoticeMinutes === "number" ? body.minimumNoticeMinutes : undefined,
+        bufferMinutes: typeof body?.bufferMinutes === "number" ? body.bufferMinutes : 0,
       });
       return c.json(profile);
     } catch (error) {
@@ -701,11 +756,35 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  /** Live deposit the apply form shows -- price + rate in, escrow-asset
+   * amount out. A client-supplied `deposit` field is ignored; the server
+   * always recomputes. Out-of-range rate (or bad price) is 400 with no
+   * preview body. */
+  app.post("/me/provider/application/deposit-preview", requirePactlyAuth, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    const int = (value: unknown) => (typeof value === "number" ? value : Number.NaN);
+    try {
+      const deposit = previewApplicationDeposit({
+        priceAmount: text(body?.priceAmount),
+        depositRateBps: int(body?.depositRateBps),
+      });
+      return c.json({ deposit });
+    } catch (error) {
+      if (error instanceof InvalidProviderApplicationError) {
+        return c.json({ code: "INVALID_APPLICATION", message: error.message, details: error.details }, 400);
+      }
+      throw error;
+    }
+  });
+
   app.post("/me/provider/application", requirePactlyAuth, async (c) => {
     const body = await c.req.json().catch(() => undefined);
     const text = (value: unknown) => (typeof value === "string" ? value : "");
     const int = (value: unknown) => (typeof value === "number" ? value : Number.NaN);
     try {
+      // Price + rate only; any client-supplied deposit is ignored -- the
+      // service recomputes via computeDepositAmount on read.
       const application = await applyAsProvider(db, c.get("walletAddress"), {
         name: text(body?.name),
         title: text(body?.title),
@@ -758,6 +837,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     const providerId = typeof body?.providerId === "string" ? body.providerId : undefined;
     const slotStartsAt = typeof body?.slotStartsAt === "number" ? body.slotStartsAt : undefined;
     const tzOffsetMinutes = typeof body?.tzOffsetMinutes === "number" ? body.tzOffsetMinutes : undefined;
+    const clientEmail = typeof body?.clientEmail === "string" ? body.clientEmail : undefined;
+    const renewExpired = body?.renewExpired === true;
     if (!providerId || slotStartsAt === undefined) {
       return c.json(
         { code: "invalid_request", message: "providerId and slotStartsAt are required." },
@@ -773,6 +854,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         clientWalletAddress: c.get("walletAddress"),
         slotStartsAt,
         tzOffsetMinutes,
+        clientEmail,
+        renewExpired,
       });
       return c.json(result, 201);
     } catch (error) {
@@ -893,6 +976,9 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  /** Booking detail for the owning client. Includes `serverTime` (UTC epoch
+   * seconds) alongside `cancelDeadline` so the free-cancellation countdown
+   * can follow the server clock and resync on every poll/refetch. */
   app.get("/bookings/:id", requirePactlyAuth, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
@@ -926,6 +1012,21 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
     if (error instanceof XdrMismatchError) {
       return c.json({ code: "XDR_MISMATCH", message: error.message }, 409);
+    }
+    if (error instanceof QuoteStaleError) {
+      return c.json({ code: "QUOTE_STALE", message: error.message, details: error.details }, 409);
+    }
+    if (error instanceof QuoteMismatchError) {
+      return c.json({ code: "QUOTE_MISMATCH", message: error.message }, 409);
+    }
+    if (error instanceof AnchorQuoteUnsupportedError) {
+      return c.json(
+        { code: "QUOTE_UNSUPPORTED", message: "The anchor doesn't offer a local-currency price for this right now." },
+        409,
+      );
+    }
+    if (error instanceof AnchorQuoteUnavailableError) {
+      return c.json({ code: "QUOTE_UNAVAILABLE", message: "We couldn't reach the currency exchange just now." }, 503);
     }
     if (error instanceof AmountOutOfRangeError) {
       return c.json(
@@ -978,6 +1079,32 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       return c.json({ code: "PAYMENT_UNAVAILABLE", message: "We couldn't reach the network just now." }, 503);
     }
     return undefined;
+  }
+
+  /** Reads the client's confirmed SEP-38 quote from a request body. Only a
+   * complete, typed quote counts as a confirmation; anything else falls back
+   * to the backend's own fresh quote rather than trusting an arbitrary fiat
+   * amount from the client. */
+  function parseConfirmedQuote(body: unknown): ConfirmedQuote | undefined {
+    const raw = (body as { quote?: unknown } | undefined)?.quote;
+    if (typeof raw !== "object" || raw === null) return undefined;
+    const quote = raw as Record<string, unknown>;
+    const fiat = quote.fiat;
+    if (
+      typeof quote.amount !== "string" ||
+      typeof quote.quotedAt !== "number" ||
+      typeof fiat !== "object" ||
+      fiat === null ||
+      typeof (fiat as Record<string, unknown>).amount !== "string"
+    ) {
+      return undefined;
+    }
+    return {
+      amount: quote.amount,
+      quotedAt: quote.quotedAt,
+      maxAgeSeconds: typeof quote.maxAgeSeconds === "number" ? quote.maxAgeSeconds : undefined,
+      fiat: fiat as ConfirmedQuote["fiat"],
+    };
   }
 
   /** Friendbot + USDC trustline for a custodial / passkey-rail G… — coalesces
@@ -1033,9 +1160,14 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     if (!bookingId) {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
     }
+    const body = await c.req.json().catch(() => undefined);
+    const confirmedQuote = parseConfirmedQuote(body);
     try {
       await ensureCustodialReady(c.get("walletAddress"));
-      const result = await openLocalDeposit(db, bookingId, c.get("walletAddress"), localDepositDeps);
+      const result = await openLocalDeposit(db, bookingId, c.get("walletAddress"), {
+        ...localDepositDeps,
+        confirmedQuote,
+      });
       return c.json(result);
     } catch (error) {
       const mapped = localDepositErrorResponse(error, c);
@@ -1054,8 +1186,12 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     if (!signedXdr) {
       return c.json({ code: "invalid_request", message: "signedXdr is required." }, 400);
     }
+    const confirmedQuote = parseConfirmedQuote(body);
     try {
-      const result = await submitLocalDepositTrustline(db, bookingId, c.get("walletAddress"), signedXdr, localDepositDeps);
+      const result = await submitLocalDepositTrustline(db, bookingId, c.get("walletAddress"), signedXdr, {
+        ...localDepositDeps,
+        confirmedQuote,
+      });
       return c.json(result);
     } catch (error) {
       const mapped = localDepositErrorResponse(error, c);
@@ -1465,6 +1601,101 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       throw error;
     }
+  });
+
+  // ---------------------------------------------------------------------
+  // Story 5.8: admin category management. Any admin wallet may create a
+  // category or hide/show an existing one.
+  // ---------------------------------------------------------------------
+
+  app.post("/admin/categories", requirePactlyAuth, requireAdmin, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const slug = typeof body?.slug === "string" ? body.slug.trim() : "";
+    
+    if (!name || !slug) {
+      return c.json({ code: "invalid_request", message: "name and slug are required." }, 400);
+    }
+    
+    // Check if slug already exists
+    const existing = await getCategoryBySlug(db, slug);
+    if (existing) {
+      return c.json({ code: "DUPLICATE_SLUG", message: "A category with this slug already exists." }, 409);
+    }
+    
+    const { randomUUID } = await import("node:crypto");
+    const id = randomUUID();
+    await insertCategory(db, { id, name, slug });
+    // Return the category we just created
+    return c.json({ category: { id, name, slug, visible: true, parentCategoryId: null } }, 201);
+  });
+
+  app.patch("/admin/categories/:id/visibility", requirePactlyAuth, requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) {
+      return c.json({ code: "invalid_request", message: "category id is required." }, 400);
+    }
+    
+    const body = await c.req.json().catch(() => undefined);
+    const visible = body?.visible;
+    if (typeof visible !== "boolean") {
+      return c.json({ code: "invalid_request", message: "visible must be a boolean." }, 400);
+    }
+    
+    const category = await getCategoryById(db, id);
+    if (!category) {
+      return c.json({ code: "CATEGORY_NOT_FOUND", message: "No category was found with that id." }, 404);
+    }
+    
+    await updateCategoryVisibility(db, id, visible);
+    const updated = await getCategoryById(db, id);
+    return c.json({ category: updated });
+  });
+
+  // ---------------------------------------------------------------------
+  // Shop reports: clients can report a shop listing to admins.
+  // ---------------------------------------------------------------------
+
+  /** A signed-in client submits a report against an approved shop. Rate
+   * limited to once per day per shop. */
+  app.post("/providers/:id/report", requirePactlyAuth, async (c) => {
+    const providerProfileId = c.req.param("id");
+    if (!providerProfileId) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+    const body = await c.req.json().catch(() => undefined);
+    const reason = typeof body?.reason === "string" ? body.reason : "";
+    
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const result = await submitShopReport(
+        db,
+        {
+          providerProfileId,
+          reportedByWallet: c.get("walletAddress"),
+          reason,
+        },
+        now,
+      );
+      return c.json(result, 201);
+    } catch (error) {
+      if (error instanceof ShopNotFoundError) {
+        return c.json({ code: "SHOP_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof InvalidReportReasonError) {
+        return c.json({ code: "INVALID_REASON", message: error.message }, 400);
+      }
+      if (error instanceof ReportRateLimitError) {
+        return c.json({ code: "RATE_LIMIT", message: error.message }, 429);
+      }
+      throw error;
+    }
+  });
+
+  /** Admins list all shop reports, newest first. */
+  app.get("/admin/shop-reports", requirePactlyAuth, requireAdmin, async (c) => {
+    const reports = await getShopReportsForAdmin(db);
+    return c.json({ reports });
   });
 
   return app;

@@ -22,6 +22,8 @@ export interface NewProviderProfile {
   priceAmount: string;
   depositRateBps: number;
   cancellationWindowHours: number;
+  bufferMinutes?: number;
+  minimumNoticeMinutes?: number;
   isApproved?: boolean;
   createdAt: number;
 }
@@ -41,6 +43,8 @@ export async function insertProviderProfile(db: Db, values: NewProviderProfile):
     priceAmount: values.priceAmount,
     depositRateBps: values.depositRateBps,
     cancellationWindowHours: values.cancellationWindowHours,
+    bufferMinutes: values.bufferMinutes ?? 0,
+    minimumNoticeMinutes: values.minimumNoticeMinutes ?? 0,
     isApproved: values.isApproved ?? false,
     createdAt: values.createdAt,
   });
@@ -165,6 +169,7 @@ export async function listApprovedProviderProfilesForDiscover(
       priceAmount: providerProfiles.priceAmount,
       depositRateBps: providerProfiles.depositRateBps,
       cancellationWindowHours: providerProfiles.cancellationWindowHours,
+      bufferMinutes: providerProfiles.bufferMinutes,
       isApproved: providerProfiles.isApproved,
       verifiedSessionCount: providerProfiles.verifiedSessionCount,
       providerCancellationCount: providerProfiles.providerCancellationCount,
@@ -180,6 +185,9 @@ export interface ProviderRulesValues {
   priceAmount: string;
   depositRateBps: number;
   cancellationWindowHours: number;
+  /** Issue #36: minimum notice in minutes (0-10080). */
+  minimumNoticeMinutes?: number;
+  bufferMinutes: number;
 }
 
 /** `services/profile.ts`'s `updateProviderRules` write path -- the one
@@ -229,14 +237,53 @@ export async function setProviderProfileApproved(db: Db, id: string, isApproved:
   }
 }
 
-export async function updateProviderProfileRules(db: Db, id: string, values: ProviderRulesValues): Promise<void> {
+/**
+ * The approved-provider text-edit write path. Only the fields a shop is
+ * allowed to change after approval are in this shape; `price_amount`,
+ * `deposit_rate_bps`, `category_id` and `is_approved` are deliberately not
+ * accepted, so no caller of this function can change a commercial term by
+ * editing its profile copy.
+ */
+export interface ProviderProfileTextValues {
+  title: string;
+  bio: string;
+  languages: string;
+  sessionLengthMinutes: number;
+  location: string;
+}
+
+export async function updateProviderProfileText(db: Db, id: string, values: ProviderProfileTextValues): Promise<void> {
   const result = await db
     .update(providerProfiles)
     .set({
-      priceAmount: values.priceAmount,
-      depositRateBps: values.depositRateBps,
-      cancellationWindowHours: values.cancellationWindowHours,
+      title: values.title,
+      bio: values.bio,
+      languages: values.languages,
+      sessionLengthMinutes: values.sessionLengthMinutes,
+      location: values.location,
     })
+    .where(eq(providerProfiles.id, id));
+  if (result.changes === 0) {
+    throw new TypeError(`No provider profile exists with id "${id}"`);
+  }
+}
+
+export async function updateProviderProfileRules(db: Db, id: string, values: ProviderRulesValues): Promise<void> {
+  const updateFields: Record<string, string | number> = {
+    priceAmount: values.priceAmount,
+    depositRateBps: values.depositRateBps,
+    cancellationWindowHours: values.cancellationWindowHours,
+  };
+  // Issue #36: only update minimum notice if provided
+  if (values.minimumNoticeMinutes !== undefined) {
+    updateFields.minimumNoticeMinutes = values.minimumNoticeMinutes;
+  }
+  if (values.bufferMinutes !== undefined) {
+    updateFields.bufferMinutes = values.bufferMinutes;
+  }
+  const result = await db
+    .update(providerProfiles)
+    .set(updateFields)
     .where(eq(providerProfiles.id, id));
   if (result.changes === 0) {
     throw new TypeError(`No provider profile exists with id "${id}"`);

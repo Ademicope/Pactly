@@ -36,6 +36,10 @@ export interface ProviderProfile {
   id: string;
   displayName: string;
   title: string;
+  /** The shop's description -- editable by an approved provider. */
+  bio: string;
+  /** Language names/codes, decoded from the backend's JSON column. */
+  languages: string[];
   category: Category;
   location: string;
   sessionFormat: string;
@@ -44,6 +48,7 @@ export interface ProviderProfile {
   deposit: Money;
   depositRateBps: number;
   cancellationWindowHours: number;
+  bufferMinutes: number;
   verifiedSessionCount: number;
   isApproved: boolean;
   /** UTC epoch seconds, ascending. */
@@ -132,10 +137,15 @@ export interface HoldSlotResponse {
   price: Money;
   /** UTC epoch seconds. */
   cancelDeadline: number;
+  /** UTC epoch seconds -- server clock at response time. */
+  serverTime: number;
   provider: BookingProviderSummary;
   /** `true` only when the free-cancellation window had already passed at
    * the moment of the hold -- omitted (never `false`) otherwise. */
   freeCancellationEnded?: boolean;
+  /** `true` only when a resume read found an expired, never-deployed hold.
+   * The UI clears the hold and offers an explicit re-hold action. */
+  isExpiredHold?: true;
 }
 
 /** Review follow-up: `deployed: true` means a signed deploy was already
@@ -179,6 +189,10 @@ export interface BookingView {
   price: Money;
   slotStartsAt: number | null;
   cancelDeadline: number;
+  /** UTC epoch seconds -- server clock at response time. Resynced on every
+   * refetch so the free-cancellation countdown stays aligned with the
+   * clock that will accept or refuse a cancel. */
+  serverTime: number;
   provider: BookingProviderSummary;
   /** Story 3.7: the on-chain transaction hash once the balance was paid
    * through Pactly (`null` for unpaid or paid-in-cash) -- drives the
@@ -217,6 +231,8 @@ export interface BookingListItemBase {
   balancePaymentTxHash: string | null;
   /** UTC epoch seconds. */
   cancelDeadline: number;
+  /** UTC epoch seconds -- server clock at response time. */
+  serverTime: number;
   contractId: string | null;
   /** UTC epoch seconds. */
   holdExpiresAt: number | null;
@@ -237,6 +253,8 @@ export interface ProviderBookingListItem extends BookingListItemBase {
   /** Full wallet address -- shortened only at render time (`lib/stellar.ts`'s
    * `shortenStellarId`, the same helper `EscrowProof` already uses). */
   clientWalletAddress: string;
+  /** Optional client contact email for the shop's post-release mailto draft. */
+  clientEmail: string | null;
 }
 
 export interface MyBookingsResponse {
@@ -260,6 +278,15 @@ export interface ActionResponse {
   unsignedXdr: string;
   txHash: string;
 }
+
+/** `POST /bookings/:id/release`'s own response: `"ready"` carries the
+ * rebuilt release XDR to sign (the first attempt, or a retry of a signed
+ * but unapplied one, always against the same persisted contract id);
+ * `"applied"` means the chain already shows the release applied, so there
+ * is nothing to sign or submit again. */
+export type ReleaseDepositResponse =
+  | ({ status: "ready"; contractId: string } & ActionResponse)
+  | { status: "applied"; contractId: string };
 
 export type DisputeOutcome = "refund-client" | "pay-provider";
 /** Story 3.6 (review round): bound to the opener's own role -- a client may
@@ -346,6 +373,11 @@ export interface QuoteResponse {
   };
   /** UTC epoch seconds. */
   quotedAt: number;
+  /** How long the anchor honours the quote, in seconds (60 when it did not
+   * state an age). A screen older than this must refresh before confirming. */
+  maxAgeSeconds: number;
+  /** UTC epoch seconds at which the quote stops being honoured. */
+  expiresAt: number;
   spreadApplied: true;
 }
 
@@ -438,6 +470,17 @@ export interface ProviderApplicationInput {
   cancellationWindowHours: number;
 }
 
+/** `POST /me/provider/application/deposit-preview` -- price + rate in,
+ * escrow-asset deposit out (same shape the application stores). */
+export interface DepositPreviewInput {
+  priceAmount: string;
+  depositRateBps: number;
+}
+
+export interface DepositPreviewResponse {
+  deposit: Money;
+}
+
 export interface OwnProviderApplicationResponse {
   application: ProviderApplication;
 }
@@ -447,3 +490,28 @@ export interface AdminApplicationsResponse {
 }
 
 export type ProviderApplicationOutcome = "approve" | "reject";
+
+// ---------------------------------------------------------------------------
+// Shop reports: clients can report a shop to admins.
+// ---------------------------------------------------------------------------
+
+export interface ShopReportSubmitResponse {
+  reportId: string;
+}
+
+export interface ShopReport {
+  id: string;
+  reason: string;
+  createdAt: number;
+  reportedByWallet: string;
+  provider: {
+    id: string;
+    displayName: string;
+    walletAddress: string;
+    isApproved: boolean;
+  };
+}
+
+export interface ShopReportsListResponse {
+  reports: ShopReport[];
+}
