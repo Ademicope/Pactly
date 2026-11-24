@@ -83,6 +83,7 @@ test("lockDeposit refuses a short anchor deposit amount", async () => {
         assert.ok(error instanceof ShortDepositError);
         assert.equal(error.receivedAmount, shortAmount);
         assert.equal(error.requiredAmount, depositAmount);
+        assert.equal(error.asset, "USDC");
         return true;
       },
     );
@@ -183,7 +184,7 @@ test("lockDeposit refuses when anchor deposit ID exists but amountIn is null", a
         assert.ok(error instanceof ShortDepositError);
         assert.equal(error.receivedAmount, "0");
         assert.equal(error.requiredAmount, depositAmount);
-        assert.ok(error.message.includes("No anchor transfer was found"));
+        assert.equal(error.asset, "USDC");
         return true;
       },
     );
@@ -192,7 +193,7 @@ test("lockDeposit refuses when anchor deposit ID exists but amountIn is null", a
   }
 });
 
-test("lockDeposit proceeds when no anchor deposit exists at all", async () => {
+test("lockDeposit refuses when no anchor deposit exists at all", async () => {
   const result = openTestDatabase();
   try {
     const clientAddress = Keypair.random().publicKey();
@@ -206,11 +207,18 @@ test("lockDeposit proceeds when no anchor deposit exists at all", async () => {
       depositAmount,
     });
 
-    // No anchor deposit set - booking will proceed with direct wallet payment
-    const lockResult = await lockDeposit(result.db, bookingId, fakeEscrowAdapter());
-    
-    assert.ok(lockResult);
-    assert.equal(lockResult.contractId, fakeContractId());
+    // No anchor deposit set - must be refused as missing transfer
+    await assert.rejects(
+      async () => lockDeposit(result.db, bookingId, fakeEscrowAdapter()),
+      (error: unknown) => {
+        assert.ok(error instanceof ShortDepositError);
+        assert.equal(error.receivedAmount, "0");
+        assert.equal(error.requiredAmount, depositAmount);
+        assert.equal(error.asset, "USDC");
+        assert.ok(error.message.includes("No anchor transfer was found"));
+        return true;
+      },
+    );
   } finally {
     closeDatabase(result);
   }

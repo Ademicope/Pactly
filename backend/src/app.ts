@@ -797,7 +797,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
           {
             code: "SHORT_DEPOSIT",
             message: error.message,
-            details: { receivedAmount: error.receivedAmount, requiredAmount: error.requiredAmount },
+            details: { receivedAmount: error.receivedAmount, requiredAmount: error.requiredAmount, asset: error.asset },
           },
           409,
         );

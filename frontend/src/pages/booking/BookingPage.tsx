@@ -24,6 +24,7 @@ import { LockButton } from "../../components/LockButton";
 import { ProviderHeader } from "../../components/ProviderHeader";
 import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
+import { formatMoney } from "../../lib/money";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
 import { signInErrorMessage } from "../../components/SignInPanel";
@@ -319,13 +320,13 @@ export function BookingPage() {
         return { fatal: true, message: "This hold has expired. The slot may already be taken again." };
       }
       if (error.code === "SHORT_DEPOSIT") {
-        const details = error.details as { receivedAmount?: string; requiredAmount?: string } | undefined;
-        if (details?.receivedAmount && details?.requiredAmount) {
-          const received = BigInt(details.receivedAmount);
-          const required = BigInt(details.requiredAmount);
+        const details = error.details as { receivedAmount?: string; requiredAmount?: string; asset?: string } | undefined;
+        if (details?.receivedAmount && details?.requiredAmount && details?.asset) {
+          const received = formatMoney(details.receivedAmount, details.asset);
+          const required = formatMoney(details.requiredAmount, details.asset);
           return {
             fatal: true,
-            message: `The anchor transfer credited ${received} USDC but this booking requires ${required} USDC. The hold remains — you can retry once you've topped up.`,
+            message: `The anchor transfer credited ${received} but this booking requires ${required}. The hold remains — you can retry once you've topped up.`,
           };
         }
         return { fatal: true, message: error.message || "The anchor transfer did not credit enough." };
