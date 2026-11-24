@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 
 import {
+  cancelHold,
   fundDepositWithRetry,
   getLocalDeposit,
   getQuote,
@@ -101,6 +102,8 @@ export function BookingPage() {
   const [hold, setHold] = useState<HoldSlotResponse | undefined>();
   const [holdSecondsLeft, setHoldSecondsLeft] = useState<number | undefined>();
   const [holdEndedWhileIdle, setHoldEndedWhileIdle] = useState(false);
+  const [cancellingHold, setCancellingHold] = useState(false);
+  const [holdCancelled, setHoldCancelled] = useState(false);
 
   const holdMutation = useHoldSlot();
 
@@ -311,6 +314,7 @@ export function BookingPage() {
   async function ensureSessionAndHold() {
     setHoldError(undefined);
     setHoldEndedWhileIdle(false);
+    setHoldCancelled(false);
     setNeedsSignIn(false);
     let activeSession = session;
     if (!activeSession) {
@@ -370,6 +374,41 @@ export function BookingPage() {
         return;
       }
       setHoldError({ message: "Connection dropped. Your deposit is untouched." });
+    }
+  }
+
+  /** Gives the slot back: removes the client's own unlocked hold, then
+   * returns the page to its "hold this slot" step. */
+  async function handleCancelHold(): Promise<void> {
+    if (!hold || !session || cancellingHold) return;
+    setCancellingHold(true);
+    setHoldError(undefined);
+    try {
+      await cancelHold(hold.bookingId, session);
+      setHold(undefined);
+      setLocalDeposit(undefined);
+      setLocalNotice(undefined);
+      setHoldEndedWhileIdle(false);
+      setHoldCancelled(true);
+      engineRef.current = {};
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+      if (error instanceof ApiError && error.code === "HOLD_EXPIRED") {
+        setHold(undefined);
+        setLocalDeposit(undefined);
+        setHoldEndedWhileIdle(true);
+        engineRef.current = {};
+        setHoldError({ message: "This hold has expired. The slot may already be taken again." });
+        return;
+      }
+      setHoldError({
+        message: error instanceof ApiError && error.message ? error.message : "Connection dropped. Your deposit is untouched.",
+      });
+    } finally {
+      setCancellingHold(false);
     }
   }
 
@@ -668,6 +707,9 @@ export function BookingPage() {
   const localReceived = localDeposit?.status === "received";
   // "Lock with Pactly" only ever appears once the bank transfer is in.
   const showLock = Boolean(hold) && localReceived;
+  // Once the bank transfer is moving or in, the hold is no longer the
+  // client's to give back from this screen.
+  const canCancelHold = phase === "idle" && !localReceived && localDeposit?.status !== "paying";
 
   if (!providerId || slotStartsAt === undefined) {
     return (
@@ -816,6 +858,11 @@ export function BookingPage() {
                   <p>Your hold ended. Hold this slot again.</p>
                 </div>
               )}
+              {holdCancelled && (
+                <div className="banner" role="status">
+                  <p>Hold cancelled. The slot is free again.</p>
+                </div>
+              )}
               <div className="field">
                 <label htmlFor="booking-client-email">Email for the shop (optional)</label>
                 <input
@@ -882,6 +929,11 @@ export function BookingPage() {
                   <p className="escrow-lane__notice" aria-live="polite">
                     {localNotice}
                   </p>
+                )}
+                {canCancelHold && (
+                  <button type="button" className="button-ghost" onClick={() => void handleCancelHold()} disabled={cancellingHold}>
+                    {cancellingHold ? "Cancelling the hold…" : "Cancel this hold"}
+                  </button>
                 )}
               </div>
             </div>

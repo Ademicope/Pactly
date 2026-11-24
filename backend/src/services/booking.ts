@@ -58,6 +58,7 @@ import {
   getExpiredHoldForWalletAndSlot,
   getReconcilableBookings,
   countPendingHoldsForWallet,
+  deleteUnlockedHold,
   insertBooking,
   insertBookingHoldIfSlotFree,
   listBookingRowsForClient,
@@ -1469,6 +1470,39 @@ export async function getBookingForClient(db: Db, bookingId: string, walletAddre
     throw new BookingNotFoundError();
   }
   return booking;
+}
+
+/**
+ * Issue #119: a client gives back their own unlocked hold
+ * (`DELETE /bookings/:id/hold`). The hold row is removed, so the slot is
+ * offered again at once.
+ *
+ * - Another client's hold (or an unknown id): {@link BookingNotFoundError},
+ *   same as every other ownership check, so bookings are not enumerable.
+ * - A locked booking (`escrowState` set) or one whose deploy was already
+ *   submitted: {@link BookingEscrowStateError}. A locked cancellation follows
+ *   the frozen terms, never this path.
+ * - A hold whose window already passed: {@link BookingHoldExpiredError}. The
+ *   slot is already free and nothing is changed.
+ */
+export async function cancelHold(
+  db: Db,
+  bookingId: string,
+  walletAddress: string,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<void> {
+  const booking = await getBookingForClient(db, bookingId, walletAddress);
+  if (booking.escrowState !== null || booking.deploySubmittedAt !== null) {
+    throw new BookingEscrowStateError("This booking is already locked. A locked booking can't be cancelled as a hold.");
+  }
+  if (booking.holdExpiresAt !== null && booking.holdExpiresAt < now) {
+    throw new BookingHoldExpiredError();
+  }
+  const removed = await deleteUnlockedHold(db, bookingId, walletAddress, now);
+  if (!removed) {
+    // The booking changed between the read above and the delete.
+    throw new BookingEscrowStateError("This booking changed while cancelling. Reload and try again.");
+  }
 }
 
 /**
