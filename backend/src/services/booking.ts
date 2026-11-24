@@ -526,6 +526,23 @@ export class XdrMismatchError extends Error {
   }
 }
 
+/**
+ * Issue #48: Thrown when a client attempts to lock a deposit but the
+ * anchor transfer credited less than the required amount. The hold remains,
+ * and the client sees both amounts (with asset) so they can either top up or abandon.
+ */
+export class ShortDepositError extends Error {
+  constructor(
+    public readonly receivedAmount: string,
+    public readonly requiredAmount: string,
+    public readonly asset: string = "USDC",
+    message = "The anchor transfer did not credit enough to cover this booking's deposit.",
+  ) {
+    super(message);
+    this.name = "ShortDepositError";
+  }
+}
+
 /** Story 3.6 (review round): a fresh build of an action was requested while
  * an earlier signed transaction for that *same* action kind on this booking
  * has already been relayed and the reconciler's own chain-derived lifecycle
@@ -654,6 +671,24 @@ export async function lockDeposit(
     throw new BookingEscrowStateError(`Booking "${bookingId}" already has escrow_state "${booking.escrowState}"; lockDeposit cannot run again`);
   }
   requireHoldNotExpired(booking, now);
+
+  // Issue #48: Validate that the anchor transfer credited enough to cover
+  // the deposit. A missing transfer (no anchorDepositId) is refused, as is
+  // a short amount. A null amountIn (transfer exists but credited nothing)
+  // is treated as "0" received. The asset uses the booking's depositAsset symbol.
+  if (!booking.anchorDepositId) {
+    throw new ShortDepositError("0", booking.depositAmount, DEPOSIT_ASSET_SYMBOL, "No anchor transfer was found for this booking.");
+  }
+  
+  const receivedAmount = booking.anchorDepositAmountIn ?? "0";
+  const requiredAmount = booking.depositAmount;
+  
+  const received = BigInt(receivedAmount);
+  const required = BigInt(requiredAmount);
+  
+  if (received < required) {
+    throw new ShortDepositError(receivedAmount, requiredAmount, DEPOSIT_ASSET_SYMBOL);
+  }
 
   if (booking.escrowContractId !== null) {
     if (booking.deploySubmittedAt !== null) {

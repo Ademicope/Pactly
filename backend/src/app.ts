@@ -88,6 +88,7 @@ import {
   BookingNotFoundError,
   InvalidDisputeReasonError,
   NothingToPayError,
+  ShortDepositError,
   SlotTakenError,
   SlotUnavailableError,
   TooManyHoldsError,
@@ -1016,6 +1017,16 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       if (error instanceof BookingEscrowStateError) {
         return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
+      }
+      if (error instanceof ShortDepositError) {
+        return c.json(
+          {
+            code: "SHORT_DEPOSIT",
+            message: error.message,
+            details: { receivedAmount: error.receivedAmount, requiredAmount: error.requiredAmount, asset: error.asset },
+          },
+          409,
+        );
       }
       if (error instanceof EscrowApiError || error instanceof EscrowRequestError || error instanceof EscrowConfigError) {
         const response = escrowErrorResponse(error);

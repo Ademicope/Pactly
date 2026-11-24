@@ -25,6 +25,7 @@ import { LockButton } from "../../components/LockButton";
 import { ProviderHeader } from "../../components/ProviderHeader";
 import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
+import { formatMoney } from "../../lib/money";
 import { formatFiatAmount } from "../../lib/money";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
@@ -381,6 +382,18 @@ export function BookingPage() {
       if (error.code === "HOLD_EXPIRED") {
         return { fatal: true, message: "This hold has expired. The slot may already be taken again." };
       }
+      if (error.code === "SHORT_DEPOSIT") {
+        const details = error.details as { receivedAmount?: string; requiredAmount?: string; asset?: string } | undefined;
+        if (details?.receivedAmount && details?.requiredAmount && details?.asset) {
+          const received = formatMoney(details.receivedAmount, details.asset);
+          const required = formatMoney(details.requiredAmount, details.asset);
+          return {
+            fatal: true,
+            message: `The anchor transfer credited ${received} but this booking requires ${required}. The hold remains — you can retry once you've topped up.`,
+          };
+        }
+        return { fatal: true, message: error.message || "The anchor transfer did not credit enough." };
+      }
       return { fatal: true, message: error.message || "Connection dropped. Your deposit is untouched." };
     }
     return { fatal: true, message: "Connection dropped. Your deposit is untouched." };
@@ -396,6 +409,13 @@ export function BookingPage() {
     if (error instanceof ApiError && error.code === "HOLD_EXPIRED") {
       setHold(undefined);
       engineRef.current = {};
+      setPhase("idle");
+      return;
+    }
+    if (error instanceof ApiError && error.code === "SHORT_DEPOSIT") {
+      // Short deposit keeps the hold and stays at idle so the client
+      // can see the error and the local-currency panel. They can retry
+      // Lock once they've topped up the transfer.
       setPhase("idle");
       return;
     }
