@@ -408,6 +408,11 @@ export async function openLocalDeposit(
     return toView(booking);
   }
 
+  // Story #19: retry a failed anchor deposit without starting a new hold
+  if (booking.anchorDepositId && booking.anchorDepositStatus && mapSep6Status(booking.anchorDepositStatus) === "failed") {
+    return retryFailedDeposit(db, booking, walletAddress, deps);
+  }
+
   await requireFreshAnchorJwt(db, walletAddress, authDeps(deps));
   await enforceLimits(booking.depositAmount, deps.fetchImpl, deps.now);
 
@@ -430,6 +435,35 @@ export async function openLocalDeposit(
     ? await confirmedQuoteAmount(booking, deps.confirmedQuote, nowSeconds, deps)
     : undefined;
   return openAgainstAnchor(db, booking, walletAddress, deps, confirmedTryAmount);
+}
+/** Story #19: retry a failed anchor deposit without starting a new hold. */
+export async function retryFailedDeposit(
+  db: Db,
+  booking: BookingRow,
+  walletAddress: string,
+  deps: LocalDepositDeps,
+): Promise<OpenLocalDepositResult> {
+  const nowSeconds = Math.floor((deps.now?.() ?? Date.now()) / 1000);
+  requireHoldNotExpired(booking, nowSeconds);
+  // Verify this is a failed deposit we can retry
+  if (!booking.anchorDepositId) {
+    throw new BookingEscrowStateError("No anchor deposit found for this booking.");
+  }
+  if (booking.anchorDepositStatus && mapSep6Status(booking.anchorDepositStatus) !== "failed") {
+    throw new BookingEscrowStateError("Deposit is not in a failed state and cannot be retried.");
+  }
+  // Reset the anchor deposit status to allow a new attempt while reusing the hold
+  await setAnchorDeposit(db, booking.id, {
+    id: booking.anchorDepositId,
+    status: "pending_user_transfer_start",
+    moreInfoUrl: booking.anchorDepositMoreInfoUrl,
+    bankDetailsJson: booking.anchorDepositBankDetails,
+    expiresAt: booking.anchorDepositExpiresAt,
+    amountIn: booking.anchorDepositAmountIn,
+    updatedAt: nowSeconds,
+  });
+  // Re-attempt the deposit from the beginning
+  return openLocalDeposit(db, booking.id, walletAddress, deps);
 }
 
 export async function submitLocalDepositTrustline(

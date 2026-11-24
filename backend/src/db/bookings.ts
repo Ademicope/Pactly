@@ -520,6 +520,11 @@ export interface PendingDispute {
   reason: DisputeReason;
   openerWallet: string;
   openerRole: DisputeOpenerRole;
+  /** Issue #22: the note the opener attached (free text, may be empty). */
+  note?: string;
+  /** Issue #22: the SHA-256 hex evidence hash the opener attached
+   * (64 lowercase hex characters, or undefined). */
+  evidenceHash?: string;
 }
 
 export async function setPendingDispute(db: Db, id: string, pending: PendingDispute): Promise<void> {
@@ -530,6 +535,8 @@ export async function setPendingDispute(db: Db, id: string, pending: PendingDisp
       pendingDisputeReason: pending.reason,
       pendingDisputeOpenerWallet: pending.openerWallet,
       pendingDisputeOpenerRole: pending.openerRole,
+      pendingDisputeNote: pending.note ?? null,
+      pendingDisputeEvidenceHash: pending.evidenceHash ?? null,
     })
     .where(eq(bookings.id, id));
 }
@@ -809,6 +816,18 @@ export async function setAnchorTrustlineTxHash(db: Db, bookingId: string, txHash
   await db.update(bookings).set({ anchorTrustlineTxHash: txHash }).where(eq(bookings.id, bookingId));
 }
 
+/**
+ * Marks a booking as arrived -- the provider's record that the client showed
+ * up. Succeeds (returns `true`) only once: the first call for a booking with
+ * no `arrivedAt` yet set. A second call returns `false` (keeps the first
+ * timestamp), and a call for a nonexistent booking also returns `false`.
+ */
+export async function markBookingArrived(db: Db, bookingId: string, arrivedAt: number): Promise<boolean> {
+  const result = await db
+    .update(bookings)
+    .set({ arrivedAt })
+    .where(and(eq(bookings.id, bookingId), isNull(bookings.arrivedAt)));
+  return result.changes > 0;
 /** Issue #35: marks client reminder as shown at the given timestamp. Once set,
  * never cleared, so a booking only shows its client reminder once. */
 export async function markClientReminderShown(db: Db, bookingId: string, shownAt: number): Promise<void> {
