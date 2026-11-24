@@ -16,7 +16,8 @@ const STATEMENTS: readonly string[] = [
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
-    parent_category_id TEXT
+    parent_category_id TEXT,
+    visible INTEGER NOT NULL DEFAULT 1
   )`,
   `CREATE TABLE IF NOT EXISTS provider_applications (
     id TEXT PRIMARY KEY,
@@ -49,6 +50,8 @@ const STATEMENTS: readonly string[] = [
     cancellation_window_hours INTEGER NOT NULL,
     buffer_minutes INTEGER NOT NULL DEFAULT 0,
     is_approved INTEGER NOT NULL DEFAULT 0,
+    suspended_at INTEGER,
+    suspension_reason TEXT,
     verified_session_count INTEGER NOT NULL DEFAULT 0,
     provider_cancellation_count INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
@@ -154,16 +157,16 @@ const STATEMENTS: readonly string[] = [
     reason TEXT NOT NULL,
     suggested_outcome TEXT,
     tx_hash TEXT NOT NULL,
+    note TEXT,
+    evidence_hash TEXT,
     opened_at INTEGER NOT NULL
   )`,
-  // Issue #7: every contract id a deploy returned for a booking, including a
-  // replaced one (see `schema.ts`'s own table comment). Its composite primary
-  // key doubles as the lookup index for "every id this booking deployed".
-  `CREATE TABLE IF NOT EXISTS escrow_contract_deployments (
-    booking_id TEXT NOT NULL,
-    contract_id TEXT NOT NULL,
-    deployed_at INTEGER NOT NULL,
-    PRIMARY KEY (booking_id, contract_id)
+  `CREATE TABLE IF NOT EXISTS saved_shops (
+    id TEXT PRIMARY KEY,
+    client_wallet_address TEXT NOT NULL,
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    created_at INTEGER NOT NULL,
+    UNIQUE (client_wallet_address, provider_profile_id)
   )`,
   // Passkey pivot: users with an embedded custodial account, their passkey
   // credentials, and the consume-once WebAuthn challenges.
@@ -240,6 +243,19 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "provider_profiles", "location")) {
     sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN location TEXT NOT NULL DEFAULT ''`);
   }
+  // Admin suspension: nullable, so every pre-existing profile is simply
+  // not suspended. Kept (rather than a boolean) because the panel shows
+  // the reason and the timestamp records when the last suspension began.
+  if (!hasColumn(sqlite, "provider_profiles", "suspended_at")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN suspended_at INTEGER`);
+  }
+  if (!hasColumn(sqlite, "provider_profiles", "suspension_reason")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN suspension_reason TEXT`);
+  }
+  // Issue #36: minimum notice minutes (0-7 days)
+  if (!hasColumn(sqlite, "provider_profiles", "minimum_notice_minutes")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN minimum_notice_minutes INTEGER NOT NULL DEFAULT 0`);
+  }
   // Story 3.4: the AD-13 slot hold's own columns -- nullable, since a
   // database created before this story has `bookings` rows that never had a
   // slot or a hold expiry (and never will retroactively).
@@ -309,6 +325,13 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "bookings", "pending_dispute_opener_role")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN pending_dispute_opener_role TEXT`);
   }
+  // Issue #22: the pending dispute's note and evidence hash.
+  if (!hasColumn(sqlite, "bookings", "pending_dispute_note")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN pending_dispute_note TEXT`);
+  }
+  if (!hasColumn(sqlite, "bookings", "pending_dispute_evidence_hash")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN pending_dispute_evidence_hash TEXT`);
+  }
   if (!hasColumn(sqlite, "bookings", "escrow_complete_submitted_at")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN escrow_complete_submitted_at INTEGER`);
   }
@@ -326,6 +349,26 @@ export function runMigrations(sqlite: Database): void {
   }
   if (!hasColumn(sqlite, "escrow_dispute_openings", "opened_by_role")) {
     sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN opened_by_role TEXT`);
+  }
+  // Issue #22: a dispute note and an evidence hash the opener can attach.
+  if (!hasColumn(sqlite, "escrow_dispute_openings", "note")) {
+    sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN note TEXT`);
+  }
+  if (!hasColumn(sqlite, "escrow_dispute_openings", "evidence_hash")) {
+    sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN evidence_hash TEXT`);
+  }
+
+  // Issue #31: one in-app event row per party per booking-level action
+  // (lock, release, dispute, resolve), visible to each party on bookings
+  // they belong to.
+  if (!hasColumn(sqlite, "escrow_events", "id")) {
+    sqlite.exec(`CREATE TABLE IF NOT EXISTS escrow_events (
+      id TEXT PRIMARY KEY,
+      booking_id TEXT NOT NULL REFERENCES bookings(id),
+      wallet_address TEXT NOT NULL,
+      type TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`);
   }
 
   // Story 3.7: paying the balance before the session -- independent of the
@@ -362,6 +405,24 @@ export function runMigrations(sqlite: Database): void {
   }
   if (!hasColumn(sqlite, "bookings", "anchor_trustline_tx_hash")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN anchor_trustline_tx_hash TEXT`);
+  }
+  // Mark client arrived: the shop marks when a client walks in.
+  if (!hasColumn(sqlite, "bookings", "arrived_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN arrived_at INTEGER`);
+  // Optional client email for the shop's post-release mailto draft (#47).
+  if (!hasColumn(sqlite, "bookings", "client_email")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN client_email TEXT`);
+  }
+  // Issue #35: appointment reminders
+  if (!hasColumn(sqlite, "bookings", "client_reminder_shown_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN client_reminder_shown_at INTEGER`);
+  }
+  if (!hasColumn(sqlite, "bookings", "provider_reminder_shown_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN provider_reminder_shown_at INTEGER`);
+  }
+  // Story 5.8: admin can hide categories from discovery and new applications.
+  if (!hasColumn(sqlite, "categories", "visible")) {
+    sqlite.exec(`ALTER TABLE categories ADD COLUMN visible INTEGER NOT NULL DEFAULT 1`);
   }
   // Appointment buffer: minutes kept free after a locked booking before
   // another slot is offered. Default 0 keeps adjacent slots (existing rows).

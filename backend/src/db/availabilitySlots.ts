@@ -58,6 +58,10 @@ export interface ListFutureSlotsOptions {
    * days"). Omitted entirely for a provider's own view, which sees every
    * future slot regardless of how far out it is. */
   withinSeconds?: number;
+  /** Issue #36: drops every slot that starts sooner than this many minutes
+   * from `now` (the shop's own minimum-notice setting). `0`/omitted keeps
+   * every future slot. */
+  minimumNoticeMinutes?: number;
 }
 
 /** Every slot for `providerProfileId` that starts after `now`, ascending --
@@ -163,6 +167,11 @@ export async function listOpenFutureSlots(
   ];
   if (options.withinSeconds !== undefined) {
     conditions.push(lte(availabilitySlots.startsAt, now + options.withinSeconds));
+  }
+  // Issue #36: filter out slots within minimum notice period
+  if (options.minimumNoticeMinutes && options.minimumNoticeMinutes > 0) {
+    const minStartTime = now + options.minimumNoticeMinutes * 60;
+    conditions.push(gte(availabilitySlots.startsAt, minStartTime));
   }
   return db
     .select()

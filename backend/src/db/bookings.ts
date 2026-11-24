@@ -26,6 +26,8 @@ export interface NewBooking {
   id: string;
   providerProfileId: string;
   clientWalletAddress: string;
+  /** Optional client contact email for post-release mailto drafts. */
+  clientEmail?: string | null;
   tokenAddress: string;
   depositAmount: string;
   balanceAmount?: string;
@@ -58,6 +60,7 @@ export async function insertBooking(db: Db, values: NewBooking): Promise<void> {
     id: values.id,
     providerProfileId: values.providerProfileId,
     clientWalletAddress: values.clientWalletAddress,
+    clientEmail: values.clientEmail ?? null,
     tokenAddress: values.tokenAddress,
     depositAmount: values.depositAmount,
     balanceAmount: values.balanceAmount ?? "0",
@@ -91,12 +94,12 @@ export async function insertBookingHoldIfSlotFree(
 ): Promise<boolean> {
   const result = db.run(sql`
     INSERT INTO bookings (
-      id, provider_profile_id, client_wallet_address, token_address,
+      id, provider_profile_id, client_wallet_address, client_email, token_address,
       deposit_amount, balance_amount, cancel_deadline, slot_id, hold_expires_at,
       balance_state, created_at
     )
     SELECT
-      ${values.id}, ${values.providerProfileId}, ${values.clientWalletAddress}, ${values.tokenAddress},
+      ${values.id}, ${values.providerProfileId}, ${values.clientWalletAddress}, ${values.clientEmail ?? null}, ${values.tokenAddress},
       ${values.depositAmount}, ${values.balanceAmount ?? "0"}, ${values.cancelDeadline}, ${values.slotId}, ${values.holdExpiresAt},
       ${values.balanceState ?? "unpaid"}, ${values.createdAt}
     WHERE NOT EXISTS (
@@ -213,6 +216,13 @@ export function updateEscrowStateSync(db: DbOrTx, id: string, escrowState: Escro
  * `balanceState`, which is a different owner's column (AD-3). */
 export async function updateEscrowState(db: Db, id: string, escrowState: EscrowState): Promise<void> {
   updateEscrowStateSync(db, id, escrowState);
+}
+
+/** Stores an optional client contact email for post-release mailto drafts.
+ * Empty / whitespace clears the field back to null. */
+export async function updateClientEmail(db: Db, id: string, clientEmail: string | null): Promise<void> {
+  const trimmed = clientEmail?.trim() || null;
+  await db.update(bookings).set({ clientEmail: trimmed }).where(eq(bookings.id, id));
 }
 
 /** Same as {@link updateEscrowStateSync}, except the write itself is
@@ -479,6 +489,11 @@ export interface PendingDispute {
   reason: DisputeReason;
   openerWallet: string;
   openerRole: DisputeOpenerRole;
+  /** Issue #22: the note the opener attached (free text, may be empty). */
+  note?: string;
+  /** Issue #22: the SHA-256 hex evidence hash the opener attached
+   * (64 lowercase hex characters, or undefined). */
+  evidenceHash?: string;
 }
 
 export async function setPendingDispute(db: Db, id: string, pending: PendingDispute): Promise<void> {
@@ -489,6 +504,8 @@ export async function setPendingDispute(db: Db, id: string, pending: PendingDisp
       pendingDisputeReason: pending.reason,
       pendingDisputeOpenerWallet: pending.openerWallet,
       pendingDisputeOpenerRole: pending.openerRole,
+      pendingDisputeNote: pending.note ?? null,
+      pendingDisputeEvidenceHash: pending.evidenceHash ?? null,
     })
     .where(eq(bookings.id, id));
 }
@@ -766,4 +783,28 @@ export async function extendHoldExpiresAt(db: Db, bookingId: string, holdExpires
 
 export async function setAnchorTrustlineTxHash(db: Db, bookingId: string, txHash: string): Promise<void> {
   await db.update(bookings).set({ anchorTrustlineTxHash: txHash }).where(eq(bookings.id, bookingId));
+}
+
+/**
+ * Marks a booking as arrived -- the provider's record that the client showed
+ * up. Succeeds (returns `true`) only once: the first call for a booking with
+ * no `arrivedAt` yet set. A second call returns `false` (keeps the first
+ * timestamp), and a call for a nonexistent booking also returns `false`.
+ */
+export async function markBookingArrived(db: Db, bookingId: string, arrivedAt: number): Promise<boolean> {
+  const result = await db
+    .update(bookings)
+    .set({ arrivedAt })
+    .where(and(eq(bookings.id, bookingId), isNull(bookings.arrivedAt)));
+  return result.changes > 0;
+/** Issue #35: marks client reminder as shown at the given timestamp. Once set,
+ * never cleared, so a booking only shows its client reminder once. */
+export async function markClientReminderShown(db: Db, bookingId: string, shownAt: number): Promise<void> {
+  await db.update(bookings).set({ clientReminderShownAt: shownAt }).where(eq(bookings.id, bookingId));
+}
+
+/** Issue #35: marks provider reminder as shown at the given timestamp. Once set,
+ * never cleared, so a booking only shows its provider reminder once. */
+export async function markProviderReminderShown(db: Db, bookingId: string, shownAt: number): Promise<void> {
+  await db.update(bookings).set({ providerReminderShownAt: shownAt }).where(eq(bookings.id, bookingId));
 }

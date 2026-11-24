@@ -39,8 +39,29 @@ export interface ProviderProfile {
   bufferMinutes: number;
   verifiedSessionCount: number;
   isApproved: boolean;
+  /** A suspended shop is absent from discovery/search and cannot take a
+   * new hold; its own panel still reads this view to show the reason. */
+  isSuspended: boolean;
+  suspensionReason: string | null;
   /** UTC epoch seconds, ascending. */
   slots: number[];
+}
+
+/** `GET/PUT/DELETE /me/provider/closed-dates` -- the shop's one-off
+ * closures, as `YYYY-MM-DD` UTC dates. */
+export interface ClosedDatesResponse {
+  closedDates: string[];
+}
+
+/** `PUT /me/provider/profile`'s editable copy -- the commercial terms and
+ * the approval flag are deliberately absent, so an edit cannot change what
+ * a client pays. */
+export interface ProviderProfileEditInput {
+  title: string;
+  bio: string;
+  languages: string[];
+  sessionLengthMinutes: number;
+  location: string;
 }
 
 export interface CategoriesResponse {
@@ -192,6 +213,9 @@ export interface BookingView {
    * through Pactly (`null` for unpaid or paid-in-cash) -- drives the
    * balance row's own Stellar Expert link. */
   balancePaymentTxHash: string | null;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +258,9 @@ export interface BookingListItemBase {
    * shown under a separate, collapsed "Expired holds" group, never mixed
    * into the main list (the spec's own "Always" rule). */
   isExpiredHold: boolean;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
 }
 
 export interface ClientBookingListItem extends BookingListItemBase {
@@ -244,6 +271,8 @@ export interface ProviderBookingListItem extends BookingListItemBase {
   /** Full wallet address -- shortened only at render time (`lib/stellar.ts`'s
    * `shortenStellarId`, the same helper `EscrowProof` already uses). */
   clientWalletAddress: string;
+  /** Optional client contact email for the shop's post-release mailto draft. */
+  clientEmail: string | null;
 }
 
 export interface MyBookingsResponse {
@@ -252,6 +281,25 @@ export interface MyBookingsResponse {
 
 export interface ProviderBookingsResponse {
   bookings: ProviderBookingListItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Issue #31: the in-app event list (lock, release, dispute, resolve).
+// ---------------------------------------------------------------------------
+
+export type EscrowEventType = "lock" | "release" | "dispute" | "resolve";
+
+export interface EscrowEvent {
+  id: string;
+  bookingId: string;
+  walletAddress: string;
+  type: EscrowEventType;
+  /** UTC epoch seconds. */
+  createdAt: number;
+}
+
+export interface MyEventsResponse {
+  events: EscrowEvent[];
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +340,10 @@ export type DisputeOpenerRole = "client" | "provider";
 export interface OpenDisputeResponse extends ActionResponse {
   reason: DisputeReason;
   suggestedOutcome?: DisputeOutcome;
+  /** Issue #22: the note the opener attached (free text, may be empty). */
+  note?: string;
+  /** Issue #22: the SHA-256 hex evidence hash the opener attached (or undefined). */
+  evidenceHash?: string;
 }
 
 /** `POST /admin/bookings/:id/resolve`'s response. */
@@ -480,6 +532,41 @@ export interface AdminApplicationsResponse {
 
 export type ProviderApplicationOutcome = "approve" | "reject";
 
+/** Saved shops: a client's personal list of shops they want to book again. */
+
+export interface SaveShopResponse {
+  savedShopId: string;
+}
+
+export interface UnsaveShopResponse {
+  unsaved: boolean;
+}
+
+export interface IsShopSavedResponse {
+  isSaved: boolean;
+}
+
+export interface SavedShop {
+  id: string;
+  provider: {
+    id: string;
+    displayName: string;
+    title: string;
+    location: string;
+    categoryId: string;
+    sessionFormat: string;
+    sessionLengthMinutes: number;
+    priceAmount: string;
+    depositRateBps: number;
+    cancellationWindowHours: number;
+    isApproved: boolean;
+    verifiedSessionCount: number;
+  };
+  savedAt: number;
+}
+
+export interface SavedShopsResponse {
+  shops: SavedShop[];
 // ---------------------------------------------------------------------------
 // Shop reports: clients can report a shop to admins.
 // ---------------------------------------------------------------------------

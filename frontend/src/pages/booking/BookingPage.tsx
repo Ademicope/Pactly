@@ -26,6 +26,7 @@ import { LockButton } from "../../components/LockButton";
 import { ProviderHeader } from "../../components/ProviderHeader";
 import { Seal } from "../../components/Seal";
 import { TryAmount, useFormatTry } from "../../components/TryAmount";
+import { formatMoney } from "../../lib/money";
 import { formatFiatAmount } from "../../lib/money";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSlotDay, formatSlotTime } from "../../lib/time";
@@ -116,6 +117,9 @@ export function BookingPage() {
   const [localDeposit, setLocalDeposit] = useState<LocalDepositView | undefined>();
   const [localBusy, setLocalBusy] = useState(false);
   const [localNotice, setLocalNotice] = useState<string | undefined>();
+  /** Optional contact email stored on the booking so the shop can open a
+   * mailto draft after release — Pactly never sends mail itself. */
+  const [clientEmail, setClientEmail] = useState("");
 
   // The local-currency figure this screen is showing comes from a SEP-38
   // quote. Remember *when we fetched it* so a tab left open cannot keep
@@ -123,6 +127,8 @@ export function BookingPage() {
   const [depositQuote, setDepositQuote] = useState<DisplayedQuote | undefined>();
   const [quoteBusy, setQuoteBusy] = useState(false);
   const [quoteError, setQuoteError] = useState<string | undefined>();
+  const flowFatalErrorRef = useRef<HTMLParagraphElement | null>(null);
+  const quoteErrorRef = useRef<HTMLParagraphElement | null>(null);
 
   // Review follow-up: the flow's own "engine" state (which contractId is in
   // play, whether a deploy has actually been submitted) lives in a ref, not
@@ -141,6 +147,13 @@ export function BookingPage() {
   const resumeAttemptedRef = useRef(false);
   const bookingFactsReadRef = useRef(false);
   const formatTryAmount = useFormatTry();
+
+  useEffect(() => {
+    if (flowFatalError) flowFatalErrorRef.current?.focus();
+  }, [flowFatalError]);
+  useEffect(() => {
+    if (quoteError) quoteErrorRef.current?.focus();
+  }, [quoteError]);
 
   const isLocked = phase === "locked";
   const booking = useBooking(hold?.bookingId, session, {
@@ -253,7 +266,13 @@ export function BookingPage() {
     if (!session || !providerId || slotStartsAt === undefined || hold) return;
     resumeAttemptedRef.current = true;
     void holdMutation
-      .mutateAsync({ providerId, slotStartsAt, token: session.token, tzOffsetMinutes: new Date().getTimezoneOffset() })
+      .mutateAsync({
+        providerId,
+        slotStartsAt,
+        token: session.token,
+        tzOffsetMinutes: new Date().getTimezoneOffset(),
+        ...(clientEmail.trim() ? { clientEmail: clientEmail.trim() } : {}),
+      })
       .then((result) => {
         if (result.isExpiredHold) {
           setHold(undefined);
@@ -371,6 +390,7 @@ export function BookingPage() {
         slotStartsAt,
         token: activeSession.token,
         tzOffsetMinutes: new Date().getTimezoneOffset(),
+        ...(clientEmail.trim() ? { clientEmail: clientEmail.trim() } : {}),
         renewExpired: holdEndedWhileIdle,
       });
       if (result.isExpiredHold) {
@@ -415,6 +435,18 @@ export function BookingPage() {
       if (error.code === "HOLD_EXPIRED") {
         return { fatal: true, message: "This hold has expired. The slot may already be taken again." };
       }
+      if (error.code === "SHORT_DEPOSIT") {
+        const details = error.details as { receivedAmount?: string; requiredAmount?: string; asset?: string } | undefined;
+        if (details?.receivedAmount && details?.requiredAmount && details?.asset) {
+          const received = formatMoney(details.receivedAmount, details.asset);
+          const required = formatMoney(details.requiredAmount, details.asset);
+          return {
+            fatal: true,
+            message: `The anchor transfer credited ${received} but this booking requires ${required}. The hold remains — you can retry once you've topped up.`,
+          };
+        }
+        return { fatal: true, message: error.message || "The anchor transfer did not credit enough." };
+      }
       return { fatal: true, message: error.message || "Connection dropped. Your deposit is untouched." };
     }
     return { fatal: true, message: "Connection dropped. Your deposit is untouched." };
@@ -447,6 +479,13 @@ export function BookingPage() {
     if (error instanceof ApiError && error.code === "HOLD_EXPIRED") {
       setHold(undefined);
       engineRef.current = {};
+      setPhase("idle");
+      return;
+    }
+    if (error instanceof ApiError && error.code === "SHORT_DEPOSIT") {
+      // Short deposit keeps the hold and stays at idle so the client
+      // can see the error and the local-currency panel. They can retry
+      // Lock once they've topped up the transfer.
       setPhase("idle");
       return;
     }
@@ -718,6 +757,39 @@ export function BookingPage() {
     }
   }
 
+  async function retryFailedDeposit(): Promise<void> {
+    if (!hold || !session || !localDeposit) return;
+    setLocalBusy(true);
+    setLocalNotice(undefined);
+    try {
+      const result = await fetch(`/api/bookings/${hold.bookingId}/deposit/local/retry`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.token}`,
+        },
+      }).catch(() => {
+        setLocalNotice("Connection error. Try again.");
+      });
+      if (result?.ok) {
+        const data = await result.json();
+        setLocalDeposit(data);
+        if (data.holdExpiresAt) {
+          setHold((current) => (current ? { ...current, holdExpiresAt: data.holdExpiresAt ?? current.holdExpiresAt } : current));
+        }
+      }
+    } catch (error) {
+      const message = localDepositErrorMessage(error);
+      if (message === "unauthorized") {
+        handleUnauthorized();
+        return;
+      }
+      setLocalNotice(message);
+    } finally {
+      setLocalBusy(false);
+    }
+  }
+
   const localReceived = localDeposit?.status === "received";
   // "Lock with Pactly" only ever appears once the bank transfer is in.
   const showLock = Boolean(hold) && localReceived;
@@ -816,7 +888,7 @@ export function BookingPage() {
               </div>
             )}
             {quoteError && (
-              <p className="banner banner--alert" role="alert" style={{ marginTop: "var(--space-3)" }}>
+              <p ref={quoteErrorRef} className="banner banner--alert" role="alert" tabIndex={-1} style={{ marginTop: "var(--space-3)" }}>
                 {quoteError}
               </p>
             )}
@@ -879,7 +951,18 @@ export function BookingPage() {
                   <p>Your hold ended. Hold this slot again.</p>
                 </div>
               )}
-              <button type="button" className="button-primary" onClick={ensureSessionAndHold} disabled={connecting || holdMutation.isPending}>
+              <div className="field">
+                <label htmlFor="booking-client-email">Email for the shop (optional)</label>
+                <input
+                  id="booking-client-email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  value={clientEmail}
+                  onChange={(event) => setClientEmail(event.target.value)}
+                />
+              </div>
+              <button type="button" className="button-primary" onClick={ensureSessionAndHold} disabled={connecting || holdMutation.isPending} aria-label={session ? "Hold this slot" : "Sign in and hold this slot"}>
                 {connecting ? "Signing you in…" : holdMutation.isPending ? "Holding your slot…" : session ? "Hold this slot" : "Sign in and hold this slot"}
               </button>
             </div>
@@ -900,6 +983,7 @@ export function BookingPage() {
                     className="button-primary"
                     onClick={() => void startLocalCurrency()}
                     disabled={localBusy || quoteBusy}
+                    aria-label="Get bank details"
                   >
                     {quoteBusy ? "Refreshing the price…" : localBusy ? "Opening the transfer…" : "Get bank details"}
                   </button>
@@ -910,14 +994,14 @@ export function BookingPage() {
                     amount={depositAmount}
                     busy={localBusy}
                     onSimulate={() => void handleSimulate()}
-                    onRetry={() => void startLocalCurrency()}
+                    onRetry={() => void retryFailedDeposit()}
                   />
                 )}
                 {localReceived && (
                   <>
                     <p className="booking-step">Step 3 · Lock the deposit</p>
                     {phase === "deploy-failed" ? (
-                      <button type="button" className="button-primary" disabled={lockInFlight} onClick={tryAgainAfterFailedDeploy}>
+                      <button type="button" className="button-primary" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
                         Try again
                       </button>
                     ) : (
@@ -953,7 +1037,7 @@ export function BookingPage() {
           {showLock && !isLocked && (
             <>
               {phase === "deploy-failed" ? (
-                <button type="button" className="button-escrow" disabled={lockInFlight} onClick={tryAgainAfterFailedDeploy}>
+                <button type="button" className="button-escrow" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
                   Try again
                 </button>
               ) : (
@@ -976,7 +1060,7 @@ export function BookingPage() {
                 </p>
               )}
               {flowFatalError && (
-                <p className="escrow-lane__notice escrow-lane__notice--alert" role="alert">
+                <p ref={flowFatalErrorRef} className="escrow-lane__notice escrow-lane__notice--alert" role="alert" tabIndex={-1}>
                   {flowFatalError}
                 </p>
               )}
@@ -987,6 +1071,16 @@ export function BookingPage() {
               <Seal />
               <p className="seal-wrap__title">You're set.</p>
               <p className="seal-wrap__subtitle">Your deposit is held in escrow by Trustless Work.</p>
+              {hold?.bookingId && slotStartsAt !== undefined && (
+                <a
+                  href={`/api/bookings/${hold.bookingId}/ics`}
+                  download={`pactly-${hold.bookingId}.ics`}
+                  className="button-ghost"
+                  style={{ marginTop: "var(--space-4)", textDecoration: "none" }}
+                >
+                  Download ICS calendar file
+                </a>
+              )}
               <Link to="/discover" className="button-ghost" style={{ marginTop: "var(--space-4)", textDecoration: "none" }}>
                 Back to Discover
               </Link>

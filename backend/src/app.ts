@@ -11,6 +11,7 @@
  * real process and hits `/health` over the real port.
  */
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import type { Context, Next } from "hono";
 
 import {
@@ -46,12 +47,14 @@ import { AccountFundingError, InvalidXdrError, NoCustodialAccountError } from ".
 import { ensureAccountReady, ensureAccountReadyInBackground, type EnsureAccountReadyDeps } from "./custodial/funding.js";
 import { signXdrForWallet } from "./custodial/keys.js";
 import { getUserByWalletAddress } from "./db/users.js";
+import { getCategoryById, getCategoryBySlug, insertCategory, updateCategoryVisibility } from "./db/categories.js";
 import { RateUnavailableError, getTryRate } from "./services/rate.js";
 import type { Db } from "./db/client.js";
 import {
   InvalidAvailabilitySlotsError,
   InvalidProviderProfileError,
   InvalidProviderRulesError,
+  InvalidSuspensionReasonError,
   NotAProviderError,
   ProviderNotApprovedError,
   ProviderNotFoundError,
@@ -61,6 +64,8 @@ import {
   listCategoriesWithProviderCounts,
   listDiscoverProviders,
   suggestDiscoverQueries,
+  suspendProviderProfile,
+  unsuspendProviderProfile,
   updateProviderAvailability,
   updateProviderRules,
   type DiscoverFilters,
@@ -76,7 +81,7 @@ import {
   decideApplication,
   getOwnProviderApplication,
   listPendingApplications,
-  previewApplicationDeposit,
+  updateOwnProviderApplication,
 } from "./services/providerApplications.js";
 import {
   BookingActionPendingError,
@@ -88,21 +93,25 @@ import {
   DepositAlreadyLandedError,
   InvalidDisputeReasonError,
   NothingToPayError,
+  ShortDepositError,
   SlotTakenError,
   SlotUnavailableError,
   TooManyHoldsError,
+  ProviderSelfBookingError,
   XdrMismatchError,
   approveAppointment,
   buildBalancePayment,
   completeAppointment,
   fundDeposit,
   getBookingForClient,
+  getBookingForClientOrProvider,
   getBookingView,
   holdSlot,
   listBookingsForClient,
   listBookingsForProvider,
   listOpenDisputes,
   lockDeposit,
+  markArrived,
   markBalancePaidCash,
   openDispute,
   releaseDeposit,
@@ -121,6 +130,9 @@ import type { SubmitPaymentDeps } from "./payments/stellar.js";
 import { config } from "./config.js";
 import { DISPUTE_OUTCOMES, type DisputeOutcome, type DisputeReason } from "./db/schema.js";
 import { getBookingById } from "./db/bookings.js";
+import { getProviderProfileById } from "./db/providerProfiles.js";
+import { getSlotById } from "./db/availabilitySlots.js";
+import { listEscrowEventsForParties } from "./db/escrowEvents.js";
 import {
   AmountOutOfRangeError,
   AnchorAuthError,
@@ -155,7 +167,15 @@ import {
   type ConfirmedQuote,
   type LocalDepositDeps,
 } from "./services/localDeposit.js";
+import { retryFailedDeposit } from "./services/localDeposit.js";
 import {
+  ShopNotFoundError as SavedShopNotFoundError,
+  ShopNotApprovedError,
+  saveShop,
+  unsaveShop,
+  isShopSaved,
+  getSavedShopsForClient,
+} from "./services/savedShops.js";
   InvalidReportReasonError,
   ReportRateLimitError,
   ShopNotFoundError,
@@ -332,6 +352,31 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     fetchImpl: options.localDepositDeps?.fetchImpl ?? (quoteFetchImpl as AnchorFetchLike | undefined),
   };
   const usdcTrustlineDeps = options.usdcTrustlineDeps ?? {};
+
+  // Security headers middleware -- sets three API headers (AC1) and ensures
+  // no wildcard CORS origin (AC3). Runs before every route.
+  app.use("*", async (c, next) => {
+    await next();
+    c.header("X-Content-Type-Options", "nosniff");
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("X-Frame-Options", "DENY");
+  });
+
+  // CORS middleware -- allows same-origin requests and never sets a wildcard
+  // origin (AC3). In development, allows localhost; in production, only the
+  // request's own origin if it matches the deployed app pattern (Vercel).
+  app.use("*", cors({
+    origin: (origin) => {
+      // Allow localhost for development, or any origin that looks like a
+      // Vercel deployment. Never return "*" (AC3).
+      if (!origin) return "http://localhost:5173";
+      if (origin.includes("localhost") || origin.includes("127.0.0.1")) return origin;
+      if (origin.includes("vercel.app") || origin.match(/https?:\/\/[^/]+\.vercel\.app$/)) return origin;
+      // For any other origin, echo it back (same-origin) -- never "*"
+      return origin;
+    },
+    credentials: true,
+  }));
 
   // Every route above handles its own typed failures and returns the
   // `{code, message}` envelope itself; this is only the backstop for a
@@ -660,6 +705,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         depositRateBps: typeof body?.depositRateBps === "number" ? body.depositRateBps : Number.NaN,
         cancellationWindowHours:
           typeof body?.cancellationWindowHours === "number" ? body.cancellationWindowHours : Number.NaN,
+        minimumNoticeMinutes: typeof body?.minimumNoticeMinutes === "number" ? body.minimumNoticeMinutes : undefined,
         bufferMinutes: typeof body?.bufferMinutes === "number" ? body.bufferMinutes : 0,
       });
       return c.json(profile);
@@ -909,6 +955,42 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  /** Correcting a pending application in place. The target is always the
+   *  caller's own newest application, so no id in the body can reach
+   *  someone else's; a decided one gets the same `409 APPLICATION_DECIDED`
+   *  `decide` already gives. */
+  app.put("/me/provider/application", requirePactlyAuth, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    const int = (value: unknown) => (typeof value === "number" ? value : Number.NaN);
+    try {
+      const application = await updateOwnProviderApplication(db, c.get("walletAddress"), {
+        name: text(body?.name),
+        title: text(body?.title),
+        categoryId: text(body?.categoryId),
+        location: text(body?.location),
+        serviceDescription: text(body?.serviceDescription),
+        sessionFormat: text(body?.sessionFormat),
+        sessionLengthMinutes: int(body?.sessionLengthMinutes),
+        priceAmount: text(body?.priceAmount),
+        depositRateBps: int(body?.depositRateBps),
+        cancellationWindowHours: int(body?.cancellationWindowHours),
+      });
+      return c.json({ application });
+    } catch (error) {
+      if (error instanceof NoProviderApplicationError) {
+        return c.json({ code: "NO_APPLICATION", message: error.message }, 404);
+      }
+      if (error instanceof ProviderApplicationDecidedError) {
+        return c.json({ code: "APPLICATION_DECIDED", message: error.message }, 409);
+      }
+      if (error instanceof InvalidProviderApplicationError) {
+        return c.json({ code: "INVALID_APPLICATION", message: error.message, details: error.details }, 400);
+      }
+      throw error;
+    }
+  });
+
   // ---------------------------------------------------------------------
   // Story 3.4: the client booking flow ("Lock with Pactly"). Every route
   // below requires a Pactly JWT; `lock`/`fund`/`submit`/`GET` all resolve
@@ -957,6 +1039,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     const providerId = typeof body?.providerId === "string" ? body.providerId : undefined;
     const slotStartsAt = typeof body?.slotStartsAt === "number" ? body.slotStartsAt : undefined;
     const tzOffsetMinutes = typeof body?.tzOffsetMinutes === "number" ? body.tzOffsetMinutes : undefined;
+    const clientEmail = typeof body?.clientEmail === "string" ? body.clientEmail : undefined;
     const renewExpired = body?.renewExpired === true;
     if (!providerId || slotStartsAt === undefined) {
       return c.json(
@@ -973,6 +1056,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         clientWalletAddress: c.get("walletAddress"),
         slotStartsAt,
         tzOffsetMinutes,
+        clientEmail,
         renewExpired,
       });
       return c.json(result, 201);
@@ -991,6 +1075,9 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
           { code: "SLOT_TAKEN", message: error.message, details: { sameDaySlots: error.sameDaySlots } },
           409,
         );
+      }
+      if (error instanceof ProviderSelfBookingError) {
+        return c.json({ code: "PROVIDER_SELF_BOOKING", message: error.message }, 409);
       }
       throw error;
     }
@@ -1032,6 +1119,16 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       if (error instanceof BookingEscrowStateError) {
         return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
+      }
+      if (error instanceof ShortDepositError) {
+        return c.json(
+          {
+            code: "SHORT_DEPOSIT",
+            message: error.message,
+            details: { receivedAmount: error.receivedAmount, requiredAmount: error.requiredAmount, asset: error.asset },
+          },
+          409,
+        );
       }
       if (error instanceof EscrowApiError || error instanceof EscrowRequestError || error instanceof EscrowConfigError) {
         const response = escrowErrorResponse(error);
@@ -1142,6 +1239,72 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       throw error;
     }
   });
+
+/** Issue #26: an ICS calendar file for a locked booking. Only the booking's
+ * own client or provider may download it, and only once the booking is
+ * locked (a hold that is not yet locked does not offer the file). The file
+ * carries the start, the duration, the shop name and the booking URL -- and
+ * nothing from the escrow (no deposit transaction, no wallet secret). */
+function escapeIcsText(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+}
+
+function formatIcsTime(epochSeconds: number): string {
+  const d = new Date(epochSeconds * 1000);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+}
+
+app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
+  const bookingId = c.req.param("id");
+  if (!bookingId) {
+    return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+  }
+  try {
+    const { booking } = await getBookingForClientOrProvider(db, bookingId, c.get("walletAddress"));
+    if (booking.escrowState !== "locked") {
+      return c.json({ code: "BOOKING_STATE", message: "An ICS download is only offered for a locked booking." }, 409);
+    }
+    const profile = await getProviderProfileById(db, booking.providerProfileId);
+    if (!profile) {
+      return c.json({ code: "BOOKING_NOT_FOUND", message: "No booking was found with that id." }, 404);
+    }
+    const slot = booking.slotId ? await getSlotById(db, booking.slotId) : undefined;
+    const startsAt = slot?.startsAt ?? null;
+    if (startsAt === null) {
+      return c.json({ code: "BOOKING_STATE", message: "This booking has no appointment time on record." }, 409);
+    }
+    const endsAt = startsAt + profile.sessionLengthMinutes * 60;
+    const nowIcs = formatIcsTime(Math.floor(Date.now() / 1000));
+    const ics = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//Pactly//Booking//EN",
+      "CALSCALE:GREGORIAN",
+      "BEGIN:VEVENT",
+      `UID:${bookingId}@pactly`,
+      `DTSTAMP:${nowIcs}`,
+      `DTSTART:${formatIcsTime(startsAt)}`,
+      `DTEND:${formatIcsTime(endsAt)}`,
+      `SUMMARY:Pactly appointment — ${escapeIcsText(profile.displayName || profile.id)}`,
+      `DESCRIPTION:Pactly booking ${escapeIcsText(bookingId)}. Deposit held in escrow by Trustless Work.`,
+      `URL:https://${config.pactlyHomeDomain}/book/${booking.providerProfileId}?slot=${startsAt}`,
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+    return new Response(ics, {
+      headers: {
+        "content-type": "text/calendar; charset=utf-8",
+        "content-disposition": `attachment; filename="pactly-${bookingId}.ics"`,
+      },
+    });
+  } catch (error) {
+    if (error instanceof BookingNotFoundError) {
+      return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+    }
+    throw error;
+  }
+});
 
   // ---------------------------------------------------------------------
   // Story 2.4: SEP-6 local-currency deposit. The client signs the anchor's
@@ -1324,6 +1487,24 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  // Story #19: retry a failed anchor deposit without starting a new hold
+  app.post("/bookings/:id/deposit/local/retry", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    try {
+      await ensureCustodialReady(c.get("walletAddress"));
+      const booking = await getBookingForClient(db, bookingId, c.get("walletAddress"));
+      const result = await retryFailedDeposit(db, booking, c.get("walletAddress"), localDepositDeps);
+      return c.json(result);
+    } catch (error) {
+      const mapped = localDepositErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
   app.post("/bookings/:id/deposit/local/trustline", requirePactlyAuth, async (c) => {
     const bookingId = c.req.param("id");
     if (!bookingId) {
@@ -1392,6 +1573,24 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
   app.get("/me/bookings", requirePactlyAuth, async (c) => {
     const bookingsList = await listBookingsForClient(db, c.get("walletAddress"));
     return c.json({ bookings: bookingsList });
+  });
+
+  /** Issue #31: the signed-in wallet's own in-app event list -- lock,
+   * release, dispute and resolve events for every booking they are a party
+   * to, newest first, linking to each booking. A wallet never sees events
+   * for a booking they are not in. */
+  app.get("/me/events", requirePactlyAuth, async (c) => {
+    const walletAddress = c.get("walletAddress");
+    const clientBookings = await listBookingsForClient(db, walletAddress);
+    let providerBookings: Array<{ id: string }> = [];
+    try {
+      providerBookings = await listBookingsForProvider(db, walletAddress);
+    } catch (error) {
+      if (!(error instanceof NotAProviderError)) throw error;
+    }
+    const bookingIds = [...new Set([...clientBookings, ...providerBookings].map((booking) => booking.id))];
+    const events = await listEscrowEventsForParties(db, walletAddress, bookingIds);
+    return c.json({ events });
   });
 
   /** The provider panel's "Bookings" view: every booking against the
@@ -1516,8 +1715,22 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     if (!reason) {
       return c.json({ code: "invalid_request", message: "reason is required." }, 400);
     }
+    // Issue #22: the dispute opener may attach a free-text note and a
+    // SHA-256 hex evidence hash (64 lowercase hex characters) to the
+    // dispute -- the file itself is never stored, only the hash.
+    const note = typeof body?.note === "string" ? body.note : "";
+    const evidenceHash = typeof body?.evidenceHash === "string" ? body.evidenceHash : "";
     try {
-      const result = await openDispute(db, bookingId, c.get("walletAddress"), reason as DisputeReason, escrowAdapter);
+      const result = await openDispute(
+        db,
+        bookingId,
+        c.get("walletAddress"),
+        reason as DisputeReason,
+        escrowAdapter,
+        undefined,
+        note,
+        evidenceHash,
+      );
       return c.json(result);
     } catch (error) {
       if (error instanceof BookingNotFoundError) {
@@ -1651,6 +1864,56 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
   });
 
   // ---------------------------------------------------------------------
+  // Admin suspension: an approved shop can be taken out of discovery with
+  // a reason and put back again. A pending application cannot be suspended
+  // (it is rejected instead); existing bookings are never touched. There is
+  // no audit log in this codebase, so nothing beyond the profile row itself
+  // is written here.
+  // ---------------------------------------------------------------------
+
+  app.post("/admin/providers/:id/suspend", requirePactlyAuth, requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+    const body = await c.req.json().catch(() => undefined);
+    try {
+      const profile = await suspendProviderProfile(db, id, typeof body?.reason === "string" ? body.reason : "");
+      return c.json({ profile });
+    } catch (error) {
+      if (error instanceof ProviderNotFoundError) {
+        return c.json({ code: "PROVIDER_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof ProviderNotApprovedError) {
+        return c.json({ code: "PROVIDER_NOT_APPROVED", message: error.message }, 409);
+      }
+      if (error instanceof InvalidSuspensionReasonError) {
+        return c.json({ code: "INVALID_SUSPENSION_REASON", message: error.message, details: error.details }, 400);
+      }
+      throw error;
+    }
+  });
+
+  app.post("/admin/providers/:id/unsuspend", requirePactlyAuth, requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+    try {
+      const profile = await unsuspendProviderProfile(db, id);
+      return c.json({ profile });
+    } catch (error) {
+      if (error instanceof ProviderNotFoundError) {
+        return c.json({ code: "PROVIDER_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof ProviderNotApprovedError) {
+        return c.json({ code: "PROVIDER_NOT_APPROVED", message: error.message }, 409);
+      }
+      throw error;
+    }
+  });
+
+  // ---------------------------------------------------------------------
   // Story 3.7: paying the balance before the session. Two independent
   // paths (AD-3: neither ever touches `escrow_state` or the Trustless Work
   // adapter) -- through Pactly (a plain Stellar payment this backend
@@ -1762,6 +2025,79 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  /** The provider marks when a client walks in -- once per booking, at or
+   * after the appointment start. A client (or anyone else with no provider
+   * profile) calling this on someone else's booking gets the same
+   * `404 BOOKING_NOT_FOUND` every other ownership check in this file gives. */
+  app.post("/bookings/:id/arrived", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      await markArrived(db, bookingId, c.get("walletAddress"), now);
+      return c.json({ ok: true });
+    } catch (error) {
+      if (error instanceof BookingNotFoundError) {
+        return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof BookingEscrowStateError) {
+        return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
+  // ---------------------------------------------------------------------
+  // Saved shops: a client's personal list of shops they want to book again.
+  // ---------------------------------------------------------------------
+
+  /** A signed-in client saves an approved shop. Idempotent. */
+  app.post("/providers/:id/save", requirePactlyAuth, async (c) => {
+  // Story 5.8: admin category management. Any admin wallet may create a
+  // category or hide/show an existing one.
+  // ---------------------------------------------------------------------
+
+  app.post("/admin/categories", requirePactlyAuth, requireAdmin, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const slug = typeof body?.slug === "string" ? body.slug.trim() : "";
+    
+    if (!name || !slug) {
+      return c.json({ code: "invalid_request", message: "name and slug are required." }, 400);
+    }
+    
+    // Check if slug already exists
+    const existing = await getCategoryBySlug(db, slug);
+    if (existing) {
+      return c.json({ code: "DUPLICATE_SLUG", message: "A category with this slug already exists." }, 409);
+    }
+    
+    const { randomUUID } = await import("node:crypto");
+    const id = randomUUID();
+    await insertCategory(db, { id, name, slug });
+    // Return the category we just created
+    return c.json({ category: { id, name, slug, visible: true, parentCategoryId: null } }, 201);
+  });
+
+  app.patch("/admin/categories/:id/visibility", requirePactlyAuth, requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) {
+      return c.json({ code: "invalid_request", message: "category id is required." }, 400);
+    }
+    
+    const body = await c.req.json().catch(() => undefined);
+    const visible = body?.visible;
+    if (typeof visible !== "boolean") {
+      return c.json({ code: "invalid_request", message: "visible must be a boolean." }, 400);
+    }
+    
+    const category = await getCategoryById(db, id);
+    if (!category) {
+      return c.json({ code: "CATEGORY_NOT_FOUND", message: "No category was found with that id." }, 404);
+    }
+    
+    await updateCategoryVisibility(db, id, visible);
+    const updated = await getCategoryById(db, id);
+    return c.json({ category: updated });
+  });
+
   // ---------------------------------------------------------------------
   // Shop reports: clients can report a shop listing to admins.
   // ---------------------------------------------------------------------
@@ -1773,6 +2109,17 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     if (!providerProfileId) {
       return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
     }
+
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const result = await saveShop(db, c.get("walletAddress"), providerProfileId, now);
+      return c.json(result, 201);
+    } catch (error) {
+      if (error instanceof SavedShopNotFoundError) {
+        return c.json({ code: "SHOP_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof ShopNotApprovedError) {
+        return c.json({ code: "SHOP_NOT_APPROVED", message: error.message }, 409);
     const body = await c.req.json().catch(() => undefined);
     const reason = typeof body?.reason === "string" ? body.reason : "";
     
@@ -1802,6 +2149,32 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     }
   });
 
+  /** A signed-in client unsaves a shop. */
+  app.delete("/providers/:id/save", requirePactlyAuth, async (c) => {
+    const providerProfileId = c.req.param("id");
+    if (!providerProfileId) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+
+    const result = await unsaveShop(db, c.get("walletAddress"), providerProfileId);
+    return c.json(result);
+  });
+
+  /** Check if a shop is saved by the signed-in client. */
+  app.get("/providers/:id/saved", requirePactlyAuth, async (c) => {
+    const providerProfileId = c.req.param("id");
+    if (!providerProfileId) {
+      return c.json({ code: "invalid_request", message: "provider id is required." }, 400);
+    }
+
+    const result = await isShopSaved(db, c.get("walletAddress"), providerProfileId);
+    return c.json(result);
+  });
+
+  /** List all saved shops for the signed-in client. */
+  app.get("/me/saved-shops", requirePactlyAuth, async (c) => {
+    const shops = await getSavedShopsForClient(db, c.get("walletAddress"));
+    return c.json({ shops });
   /** Admins list all shop reports, newest first. */
   app.get("/admin/shop-reports", requirePactlyAuth, requireAdmin, async (c) => {
     const reports = await getShopReportsForAdmin(db);

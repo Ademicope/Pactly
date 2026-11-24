@@ -70,6 +70,9 @@ import {
   releaseEscrowLock,
   markBalancePaidCashIfUnpaid,
   markBalancePaidPlatform,
+  markBookingArrived,
+  markClientReminderShown,
+  markProviderReminderShown,
   recordDeploySubmission,
   setEscrowActionSubmittedAt,
   setBalancePaymentBuiltHash,
@@ -77,6 +80,7 @@ import {
   setEscrowFundTxHash,
   setPendingDispute,
   updateBalanceState,
+  updateClientEmail,
   updateEscrowContractId,
   updateEscrowStateIfNotTerminalSync,
   type BookingRow,
@@ -91,7 +95,7 @@ import {
 } from "./availability.js";
 import { recordEscrowDisputeResolution } from "../db/escrowDisputeResolutions.js";
 import { getEscrowDisputeOpeningsForBookings, recordEscrowDisputeOpening } from "../db/escrowDisputeOpenings.js";
-import { listContractDeployments, recordContractDeployment } from "../db/escrowContractDeployments.js";
+import { recordEscrowEventForBothParties } from "../db/escrowEvents.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
 import { computeDepositAmount, NotAProviderError, ProviderNotFoundError } from "./profile.js";
 import { requireUsdcTrustline, type UsdcTrustlineDeps } from "../anchor/trustline.js";
@@ -223,6 +227,14 @@ export class SlotTakenError extends Error {
   }
 }
 
+/** Story #18: a provider cannot book its own slot */
+export class ProviderSelfBookingError extends Error {
+  constructor() {
+    super("A provider cannot book its own slot.");
+    this.name = "ProviderSelfBookingError";
+  }
+}
+
 /** Review follow-up (Issue #51): a per-wallet cap on *pending* holds (not
  * yet locked) across every provider, so one wallet cannot tie up an
  * unbounded number of slots at once. The limit is 3 open holds. */
@@ -283,6 +295,8 @@ export interface HoldSlotInput {
    * `sameDaySlots`'s calendar-day window in the caller's own local day
    * rather than UTC. Omitted (or `0`) means UTC, the previous behavior. */
   tzOffsetMinutes?: number;
+  /** Optional client contact email for the shop's post-release mailto draft. */
+  clientEmail?: string | null;
 }
 
 export interface HoldSlotResult {
@@ -336,8 +350,9 @@ function dayRange(startsAt: number, tzOffsetMinutes = 0): { start: number; end: 
  * and atomically claims the slot via {@link insertBookingHoldIfSlotFree}.
  *
  * Refuses {@link SlotUnavailableError} (`404`/`409` per the route -- an
- * unknown/unapproved provider is `404 PROVIDER_NOT_FOUND`, everything else
- * about the slot itself is `409 SLOT_UNAVAILABLE`) for an unknown provider,
+ * unknown/unapproved/suspended provider is `404 PROVIDER_NOT_FOUND`,
+ * everything else about the slot itself is `409 SLOT_UNAVAILABLE`) for an
+ * unknown provider,
  * an unapproved provider, a slot that does not exist for this provider, or
  * a slot in the past. Refuses {@link SlotTakenError} (`409 SLOT_TAKEN`)
  * when another active booking already holds this exact slot -- the one
@@ -351,8 +366,16 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   const resolveUsdc = deps.resolveUsdcAsset ?? resolveUsdcAsset;
 
   const profile = await getProviderProfileById(db, input.providerProfileId);
-  if (!profile || !profile.isApproved) {
+  // A suspended shop is refused exactly like an unapproved one: it cannot
+  // take a new hold (and so cannot receive a new lock), and the client
+  // learns nothing about why it disappeared. Existing bookings never call
+  // this path, so they keep working.
+  if (!profile || !profile.isApproved || profile.suspendedAt !== null) {
     throw new ProviderNotFoundError();
+  }
+  // Story #18: a provider cannot book its own slot
+  if (profile.walletAddress === input.clientWalletAddress) {
+    throw new ProviderSelfBookingError();
   }
   const slot = await getSlotByProviderAndStart(db, profile.id, input.slotStartsAt);
   if (!slot || slot.startsAt <= now) {
@@ -363,6 +386,14 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   // the date makes it bookable again with no pattern edit.
   if (await isDateClosed(db, profile.id, utcDateFor(slot.startsAt))) {
     throw new SlotUnavailableError();
+  }
+
+  // Issue #36: a slot sooner than the shop's notice period cannot be held.
+  if (profile.minimumNoticeMinutes > 0) {
+    const minStartTime = now + profile.minimumNoticeMinutes * 60;
+    if (slot.startsAt < minStartTime) {
+      throw new SlotUnavailableError();
+    }
   }
 
   // A slot inside the post-lock buffer is not offered -- refuse the hold the
@@ -390,6 +421,9 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   // are all the same wallet asking for what it already has.
   const existing = await getActiveBookingForWalletAndSlot(db, slot.id, input.clientWalletAddress, now);
   if (existing) {
+    if (input.clientEmail !== undefined) {
+      await updateClientEmail(db, existing.id, input.clientEmail);
+    }
     return {
       bookingId: existing.id,
       holdExpiresAt: existing.holdExpiresAt ?? now,
@@ -440,6 +474,7 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
       id: bookingId,
       providerProfileId: profile.id,
       clientWalletAddress: input.clientWalletAddress,
+      clientEmail: input.clientEmail?.trim() || null,
       tokenAddress: usdc.contractId,
       depositAmount,
       balanceAmount,
@@ -527,6 +562,23 @@ export class XdrMismatchError extends Error {
   }
 }
 
+/**
+ * Issue #48: Thrown when a client attempts to lock a deposit but the
+ * anchor transfer credited less than the required amount. The hold remains,
+ * and the client sees both amounts (with asset) so they can either top up or abandon.
+ */
+export class ShortDepositError extends Error {
+  constructor(
+    public readonly receivedAmount: string,
+    public readonly requiredAmount: string,
+    public readonly asset: string = "USDC",
+    message = "The anchor transfer did not credit enough to cover this booking's deposit.",
+  ) {
+    super(message);
+    this.name = "ShortDepositError";
+  }
+}
+
 /** Story 3.6 (review round): a fresh build of an action was requested while
  * an earlier signed transaction for that *same* action kind on this booking
  * has already been relayed and the reconciler's own chain-derived lifecycle
@@ -569,11 +621,14 @@ async function requireProviderAddress(db: Db, booking: BookingRow): Promise<stri
 
 /** Refuses {@link BookingHoldExpiredError} once `holdExpiresAt` has passed
  * (`< now` strictly past; exactly at `holdExpiresAt` is still active) with
- * `escrowState` still `null` and no contract id. A `null` `holdExpiresAt` (a booking inserted
- * before Story 3.4, or through the plain `createBookingHold` helper) never
- * expires -- there is nothing to compare against. Once `escrowState` is set
- * the hold is moot (the deposit already reconciled), so this never fires
- * for a booking past that point either. */
+ * `escrowState` still `null` and no contract id. A `null` `holdExpiresAt`
+ * (a booking inserted before Story 3.4, or through the plain
+ * `createBookingHold` helper) never expires -- there is nothing to compare
+ * against. Once `escrowState` is set the hold is moot (the deposit already
+ * reconciled), so this never fires for a booking past that point either;
+ * the same goes for a persisted `escrowContractId`, which is the evidence
+ * that a deploy was already submitted and this is no longer an uncommitted
+ * hold. */
 function requireHoldNotExpired(booking: BookingRow, now: number): void {
   if (
     booking.escrowState === null
@@ -677,6 +732,24 @@ export async function lockDeposit(
   }
   requireHoldNotExpired(booking, now);
 
+  // Issue #48: Validate that the anchor transfer credited enough to cover
+  // the deposit. A missing transfer (no anchorDepositId) is refused, as is
+  // a short amount. A null amountIn (transfer exists but credited nothing)
+  // is treated as "0" received. The asset uses the booking's depositAsset symbol.
+  if (!booking.anchorDepositId) {
+    throw new ShortDepositError("0", booking.depositAmount, DEPOSIT_ASSET_SYMBOL, "No anchor transfer was found for this booking.");
+  }
+  
+  const receivedAmount = booking.anchorDepositAmountIn ?? "0";
+  const requiredAmount = booking.depositAmount;
+  
+  const received = BigInt(receivedAmount);
+  const required = BigInt(requiredAmount);
+  
+  if (received < required) {
+    throw new ShortDepositError(receivedAmount, requiredAmount, DEPOSIT_ASSET_SYMBOL);
+  }
+
   if (booking.escrowContractId !== null) {
     if (booking.deploySubmittedAt !== null) {
       return { deployed: true, contractId: booking.escrowContractId };
@@ -697,6 +770,16 @@ export async function lockDeposit(
       );
     }
     return { deployed: false, contractId: booking.escrowContractId, unsignedXdr: booking.escrowDeployXdr, txHash: booking.escrowDeployTxHash };
+  }
+
+  // A shop an admin suspended after this hold was placed must not start a
+  // new lock. A deploy already built and stored before the suspension is
+  // still handed back by the retry path above -- its fund/submit may be in
+  // flight, and cutting that off would strand a transaction the client has
+  // already signed -- but no *new* deploy is ever built below.
+  const providerProfile = await getProviderProfileById(db, booking.providerProfileId);
+  if (providerProfile && providerProfile.suspendedAt !== null) {
+    throw new BookingEscrowStateError(`Provider for booking "${bookingId}" is suspended; no new lock can be created.`);
   }
 
   const providerAddress = await requireProviderAddress(db, booking);
@@ -757,6 +840,17 @@ export async function lockDeposit(
     }
     throw error;
   }
+  // Issue #31: a fresh deploy persisted means the lock action is underway --
+  // record a "lock" event for both parties so each side sees it on their
+  // own event list.
+  await recordEscrowEventForBothParties(
+    db,
+    booking.id,
+    booking.clientWalletAddress,
+    providerAddress,
+    "lock",
+    now,
+  );
 
   // Issue #7: recorded beside the id itself, once it is actually persisted.
   // A deploy that failed, or one that lost the race above and never stored
@@ -891,6 +985,13 @@ export async function resolveBookingDispute(
   adapter: EscrowAdapter = defaultEscrowAdapter,
 ): Promise<ResolveBookingDisputeResult> {
   const booking = await requireBooking(db, bookingId);
+  // Issue #33: a second resolve returns the stored outcome and does not
+  // call the escrow again. A booking whose deposit was already allocated
+  // by an earlier resolution is not re-resolved.
+  const existing = await getEscrowDisputeResolution(db, bookingId);
+  if (existing) {
+    return { unsignedXdr: "", txHash: existing.txHash, outcome: existing.outcome };
+  }
   if (booking.escrowState !== "locked" || !booking.escrowContractId) {
     throw new BookingEscrowStateError(
       `Booking "${bookingId}" must be "locked" with a persisted escrow contractId to resolve a dispute ` +
@@ -931,6 +1032,8 @@ export async function resolveBookingDispute(
   // so `submitSignedTransaction`'s hash-matching rule can check every
   // Story 3.6 action's hash from one row, without a second query.
   await setEscrowActionTxHash(db, bookingId, "resolve", result.txHash);
+  // Issue #31: record a "resolve" event for both parties.
+  await recordEscrowEventForBothParties(db, booking.id, booking.clientWalletAddress, providerAddress, "resolve", Math.floor(Date.now() / 1000));
 
   return { ...result, outcome };
 }
@@ -1158,6 +1261,10 @@ function computeSuggestedOutcome(reason: DisputeReason, booking: BookingRow, now
 export interface OpenDisputeResult extends UnsignedTransaction {
   reason: DisputeReason;
   suggestedOutcome?: DisputeOutcome;
+  /** Issue #22: the note the opener attached (free text, may be empty). */
+  note?: string;
+  /** Issue #22: the SHA-256 hex evidence hash the opener attached (or undefined). */
+  evidenceHash?: string;
 }
 
 /**
@@ -1190,10 +1297,17 @@ export async function openDispute(
   reason: DisputeReason,
   adapter: EscrowAdapter = defaultEscrowAdapter,
   now: number = Math.floor(Date.now() / 1000),
+  /** Issue #22: a free-text note the opener attaches to the dispute (may be empty). */
+  note: string = "",
+  /** Issue #22: a SHA-256 hex evidence hash the opener attests to (64 lowercase hex chars, or ""). */
+  evidenceHash: string = "",
 ): Promise<OpenDisputeResult> {
   const { booking, role } = await getBookingForClientOrProvider(db, bookingId, walletAddress);
   if (!isDisputeReasonAllowedForRole(reason, role)) {
     throw new InvalidDisputeReasonError();
+  }
+  if (evidenceHash !== "" && !/^[0-9a-f]{64}$/.test(evidenceHash)) {
+    throw new InvalidDisputeReasonError("The evidence hash must be 64 lowercase hex characters.");
   }
   if (booking.escrowState !== "locked" || !booking.escrowContractId) {
     throw new BookingEscrowStateError(
@@ -1214,8 +1328,11 @@ export async function openDispute(
   }
   const result = await adapter.startDispute({ contractId: booking.escrowContractId, signerAddress: walletAddress, reason });
   const suggestedOutcome = computeSuggestedOutcome(reason, booking, now);
-  await setPendingDispute(db, bookingId, { txHash: result.txHash, reason, openerWallet: walletAddress, openerRole: role });
-  return { ...result, reason, suggestedOutcome };
+  const providerAddress = await requireProviderAddress(db, booking);
+  await setPendingDispute(db, bookingId, { txHash: result.txHash, reason, openerWallet: walletAddress, openerRole: role, note: note || undefined, evidenceHash: evidenceHash || undefined });
+  // Issue #31: record a "dispute" event for both parties.
+  await recordEscrowEventForBothParties(db, booking.id, booking.clientWalletAddress, providerAddress, "dispute", now);
+  return { ...result, reason, suggestedOutcome, note: note || undefined, evidenceHash: evidenceHash || undefined };
 }
 
 export interface AdminDisputeListItem {
@@ -1557,6 +1674,37 @@ export async function markBalancePaidCash(db: Db, bookingId: string, providerWal
   }
 }
 
+/**
+ * `POST /bookings/:id/arrived`: the shop marks when a client walks in for a
+ * locked booking. Refused (typed {@link BookingNotFoundError}) for anyone
+ * but this booking's own provider; refused (typed
+ * {@link BookingEscrowStateError}) unless `escrowState` is `"locked"` (cannot
+ * mark arrived for a booking that hasn't locked yet, or one already
+ * released/refunded). Refused when the appointment hasn't started yet
+ * (slotStartsAt is in the future). The write itself ({@link markBookingArrived})
+ * keeps the first timestamp if called twice.
+ */
+export async function markArrived(db: Db, bookingId: string, providerWalletAddress: string, now: number): Promise<void> {
+  const booking = await getBookingForProvider(db, bookingId, providerWalletAddress);
+  if (booking.escrowState !== "locked") {
+    throw new BookingEscrowStateError(
+      `Booking "${bookingId}" must be locked to mark arrived (escrowState is "${booking.escrowState}")`,
+    );
+  }
+  
+  // Get the slot to check start time
+  const slot = booking.slotId ? await getSlotById(db, booking.slotId) : null;
+  if (!slot) {
+    throw new BookingEscrowStateError(`Booking "${bookingId}" has no slot to determine start time`);
+  }
+  
+  if (slot.startsAt > now) {
+    throw new BookingEscrowStateError(`Cannot mark arrived before appointment start (starts at ${slot.startsAt}, now is ${now})`);
+  }
+  
+  await markBookingArrived(db, bookingId, now);
+}
+
 // ---------------------------------------------------------------------------
 // Story 3.4: the owner check every booking route shares, `submit`, the
 // booking read view, and the hold-expiry runner tick.
@@ -1687,6 +1835,12 @@ export interface BookingView {
    * no transaction to point at). Drives the balance row's own Stellar
    * Expert link, per the spec's own "Always" rule. */
   balancePaymentTxHash: string | null;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
+  /** Issue #35: true when this read triggered showing a reminder (appointment
+   * day-before notice). False when already shown or conditions not met. */
+  reminderShown: boolean;
 }
 
 /** `GET /bookings/:id`'s own response shape: the booking's amounts (each
@@ -1695,7 +1849,10 @@ export interface BookingView {
  * provider profile, which could have changed its rules since), its
  * chain-derived lifecycle, and a small provider summary. The UI is told
  * `locked` only from here (`escrowState`), never from a submit response
- * (spec's own "Always" rule). */
+ * (spec's own "Always" rule).
+ *
+ * Issue #35: checks if a reminder should be shown and marks it. A reminder
+ * shows when the appointment is locked, within 24h, and not yet shown. */
 export async function getBookingView(
   db: Db,
   bookingId: string,
@@ -1707,6 +1864,26 @@ export async function getBookingView(
   const lifecycle = (await getEscrowLifecycle(db, bookingId)) ?? {};
   const slot = booking.slotId ? await getSlotById(db, booking.slotId) : undefined;
   const slotStartsAt = slot?.startsAt ?? null;
+
+  // Issue #35: check and mark reminder
+  let reminderShown = false;
+  const isLocked = booking.escrowState === "locked";
+  const hasSlot = slotStartsAt !== null;
+  const within24h = hasSlot && slotStartsAt - now <= 24 * 60 * 60 && slotStartsAt - now > 0;
+  // `outcome` is only ever set once a dispute has been resolved (either
+  // side may have won), so any outcome means this booking is no longer a
+  // reminder candidate.
+  const notCancelled = lifecycle.outcome === undefined;
+  const notDisputed = lifecycle.action !== "disputed";
+
+  if (isLocked && within24h && notCancelled && notDisputed) {
+    // Client is reading, check client reminder
+    if (booking.clientReminderShownAt === null) {
+      await markClientReminderShown(db, bookingId, now);
+      reminderShown = true;
+    }
+  }
+
   return {
     id: booking.id,
     escrowState: booking.escrowState,
@@ -1729,6 +1906,8 @@ export async function getBookingView(
       ? { id: profile.id, displayName: profile.displayName, title: profile.title }
       : { id: booking.providerProfileId, displayName: "", title: "" },
     balancePaymentTxHash: booking.balancePaymentTxHash,
+    arrivedAt: booking.arrivedAt,
+    reminderShown,
   };
 }
 
@@ -1975,6 +2154,8 @@ export interface BookingListItemBase {
   serverTime: number;
   contractId: string | null;
   holdExpiresAt: number | null;
+  /** Issue #35: true when this read triggered showing a reminder. */
+  reminderShown: boolean;
   /** The AD-13 hold's own 10-minute window has passed with `escrowState`
    * still `null` -- the spec's own "Always" rule: "An expired, never-funded
    * hold is listed under 'Expired holds' (collapsed), never as a booking."
@@ -1982,6 +2163,9 @@ export interface BookingListItemBase {
    * (Story 3.4's own double-sale note: an expired hold's escrow may still
    * reconcile later, so it must stay traceable from this list too). */
   isExpiredHold: boolean;
+  /** UTC epoch seconds -- when the provider marked the client as arrived,
+   * `null` until marked. */
+  arrivedAt: number | null;
 }
 
 export interface ClientBookingListItem extends BookingListItemBase {
@@ -1994,6 +2178,8 @@ export interface ProviderBookingListItem extends BookingListItemBase {
    * uses), never truncated here (this backend never invents a display
    * format; see `lib/money.ts`'s own equivalent discipline for amounts). */
   clientWalletAddress: string;
+  /** Optional client contact email for the shop's post-release mailto draft. */
+  clientEmail: string | null;
 }
 
 function isExpiredHoldRow(booking: BookingRow, now: number): boolean {
@@ -2024,6 +2210,7 @@ function toBookingListItemBase(
   slotStartsAt: number | null,
   lifecycle: EscrowLifecycle | undefined,
   now: number,
+  reminderShown: boolean = false,
 ): BookingListItemBase {
   return {
     id: booking.id,
@@ -2040,7 +2227,9 @@ function toBookingListItemBase(
     serverTime: now,
     contractId: booking.escrowContractId,
     holdExpiresAt: booking.holdExpiresAt,
+    reminderShown,
     isExpiredHold: isExpiredHoldRow(booking, now),
+    arrivedAt: booking.arrivedAt,
   };
 }
 
@@ -2051,6 +2240,8 @@ function toBookingListItemBase(
  * {@link listBookingRowsForClient}'s own `WHERE client_wallet_address = ?`
  * -- this function never filters by anything else, so another wallet's rows
  * can never leak in here.
+ * 
+ * Issue #35: checks and marks client reminders for qualifying bookings.
  */
 export async function listBookingsForClient(
   db: Db,
@@ -2068,10 +2259,26 @@ export async function listBookingsForClient(
   const profiles = await Promise.all(providerIds.map((id) => getProviderProfileById(db, id)));
   const profileById = new Map(profiles.filter((profile): profile is NonNullable<typeof profile> => Boolean(profile)).map((profile) => [profile.id, profile]));
 
+  // Issue #35: check and mark client reminders
+  const remindersShown = new Set<string>();
+  for (const { booking, slotStartsAt } of rows) {
+    const lifecycle = lifecycleByBooking.get(booking.id);
+    const isLocked = booking.escrowState === "locked";
+    const hasSlot = slotStartsAt !== null;
+    const within24h = hasSlot && slotStartsAt - now <= 24 * 60 * 60 && slotStartsAt - now > 0;
+    const notCancelled = lifecycle?.outcome === undefined;
+    const notDisputed = lifecycle?.action !== "disputed";
+
+    if (isLocked && within24h && notCancelled && notDisputed && booking.clientReminderShownAt === null) {
+      await markClientReminderShown(db, booking.id, now);
+      remindersShown.add(booking.id);
+    }
+  }
+
   const items: ClientBookingListItem[] = rows.map(({ booking, slotStartsAt }) => {
     const profile = profileById.get(booking.providerProfileId);
     return {
-      ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now),
+      ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now, remindersShown.has(booking.id)),
       provider: profile
         ? { id: profile.id, displayName: profile.displayName, title: profile.title }
         : { id: booking.providerProfileId, displayName: "", title: "" },
@@ -2088,6 +2295,8 @@ export async function listBookingsForClient(
  * already follows), so another provider's bookings can never be requested
  * through this function at all. Refuses {@link NotAProviderError} for a
  * wallet with no provider profile.
+ * 
+ * Issue #35: checks and marks provider reminders for qualifying bookings.
  */
 export async function listBookingsForProvider(
   db: Db,
@@ -2106,9 +2315,26 @@ export async function listBookingsForProvider(
     rows.map((row) => row.booking),
   );
 
+  // Issue #35: check and mark provider reminders
+  const remindersShown = new Set<string>();
+  for (const { booking, slotStartsAt } of rows) {
+    const lifecycle = lifecycleByBooking.get(booking.id);
+    const isLocked = booking.escrowState === "locked";
+    const hasSlot = slotStartsAt !== null;
+    const within24h = hasSlot && slotStartsAt - now <= 24 * 60 * 60 && slotStartsAt - now > 0;
+    const notCancelled = lifecycle?.outcome === undefined;
+    const notDisputed = lifecycle?.action !== "disputed";
+
+    if (isLocked && within24h && notCancelled && notDisputed && booking.providerReminderShownAt === null) {
+      await markProviderReminderShown(db, booking.id, now);
+      remindersShown.add(booking.id);
+    }
+  }
+
   const items: ProviderBookingListItem[] = rows.map(({ booking, slotStartsAt }) => ({
-    ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now),
+    ...toBookingListItemBase(booking, slotStartsAt, lifecycleByBooking.get(booking.id), now, remindersShown.has(booking.id)),
     clientWalletAddress: booking.clientWalletAddress,
+    clientEmail: booking.clientEmail ?? null,
   }));
   items.sort((a, b) => compareByAppointmentDate(a, b, now));
   return items;

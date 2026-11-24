@@ -44,12 +44,12 @@ export function LockButton({ waitingOn, actionLabel, disabled, onClick, onOpenWa
 
   return (
     <div className="lock-button-group">
-      <button type="button" className="button-escrow" disabled={disabled || Boolean(waitingOn)} onClick={onClick} aria-live="polite">
-        {waitingOn ? "Locking…" : actionLabel ?? "Lock with Pactly"}
+      <button type="button" className="button-escrow" disabled={disabled || Boolean(waitingOn)} onClick={onClick} aria-live="polite" aria-label="Lock with Pactly">
+        {waitingOn ? "Locking…" : "Lock with Pactly"}
       </button>
       {waitingOn && <p className="lock-button-group__hint">{waitingOn}</p>}
       {waitingOn && showTryAgain && (
-        <button type="button" className="button-ghost lock-button-group__retry" onClick={onOpenWalletAgain}>
+        <button type="button" className="button-ghost lock-button-group__retry" onClick={onOpenWalletAgain} aria-label="Try again">
           Try again
         </button>
       )}
