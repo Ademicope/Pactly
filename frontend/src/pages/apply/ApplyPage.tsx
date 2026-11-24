@@ -69,19 +69,6 @@ function formFromApplication(application: ProviderApplication, rate: string, loc
   };
 }
 
-/** Preview only -- the backend recomputes and returns the authoritative
- * deposit (same rule `AvailabilityPage` follows). */
-function previewDeposit(priceSmallestUnit: string | undefined, depositRateBps: number): string | undefined {
-  if (!priceSmallestUnit || !Number.isInteger(depositRateBps)) {
-    return undefined;
-  }
-  try {
-    return ((BigInt(priceSmallestUnit) * BigInt(depositRateBps)) / 10000n).toString();
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * `/providers/apply` -- "List your shop" (Story 4.1). Signed out, it
  * explains the three steps and asks for a passkey sign-in; signed in, it
@@ -263,6 +250,7 @@ export function ApplyPage() {
       )}
       <ApplicationForm
         key={application?.id ?? "new"}
+        session={session}
         initial={application ? formFromApplication(application, rate) : EMPTY_FORM}
         categories={categoriesQuery.data?.categories ?? []}
         pending={submit.isPending}
@@ -274,6 +262,7 @@ export function ApplyPage() {
 }
 
 interface ApplicationFormProps {
+  session: Session;
   initial: FormValues;
   categories: Array<{ id: string; name: string }>;
   pending: boolean;
@@ -301,7 +290,18 @@ function ApplicationForm({ initial, categories, pending, error, submitLabel, onS
   // Typed in TRY, sent in USDC smallest units (AD-7) at the rate on screen.
   const priceSmallestUnit = tryToUsdcSmallestUnit(values.price, rate);
   const depositRateBps = Math.round(Number(values.depositRatePercent) * 100);
-  const deposit = previewDeposit(priceSmallestUnit, depositRateBps);
+  const previewInput =
+    priceSmallestUnit && Number.isInteger(depositRateBps)
+      ? { priceAmount: priceSmallestUnit, depositRateBps }
+      : undefined;
+  const depositPreview = useApplicationDepositPreview(session, previewInput);
+  const deposit = depositPreview.data?.deposit.amount;
+  const previewFailed = Boolean(previewInput) && (depositPreview.isError || (depositPreview.isSuccess && !deposit));
+  const previewReady = Boolean(deposit) && !depositPreview.isFetching;
+  const previewDetails =
+    depositPreview.error instanceof ApiError
+      ? ((depositPreview.error.details ?? {}) as Record<string, string>)
+      : {};
 
   function set<K extends keyof FormValues>(key: K, value: FormValues[K]): void {
     setValues((current) => ({ ...current, [key]: value }));
@@ -314,6 +314,12 @@ function ApplicationForm({ initial, categories, pending, error, submitLabel, onS
       document.getElementById("apply-price")?.focus();
       return;
     }
+    // Price + rate only -- never a client-computed deposit. A failed or
+    // missing server preview blocks submit so the shop never approves a
+    // number the form invented locally.
+    if (!previewReady || previewFailed) {
+      return;
+    }
     onSubmit({
       name: values.name,
       title: values.title,
@@ -322,7 +328,7 @@ function ApplicationForm({ initial, categories, pending, error, submitLabel, onS
       serviceDescription: values.serviceDescription,
       sessionFormat: values.sessionFormat,
       sessionLengthMinutes: Number(values.sessionLengthMinutes),
-      priceAmount: priceSmallestUnit ?? "",
+      priceAmount: priceSmallestUnit,
       depositRateBps,
       cancellationWindowHours: Number(values.cancellationWindowHours),
     });
@@ -404,15 +410,23 @@ function ApplicationForm({ initial, categories, pending, error, submitLabel, onS
           {(priceTouched || values.price.trim() !== "") && !priceSmallestUnit && (
             <p className="field__error">Enter the price in lira, e.g. 1200 or 1.200,50.</p>
           )}
-          {details.priceAmount && <p className="field__error">{details.priceAmount}</p>}
+          {(details.priceAmount || previewDetails.priceAmount) && (
+            <p className="field__error">{details.priceAmount ?? previewDetails.priceAmount}</p>
+          )}
         </div>
         <div className="field">
           <label htmlFor="apply-deposit">Deposit rate (%)</label>
           <input id="apply-deposit" type="number" inputMode="decimal" min={0.01} max={100} step={0.5} value={values.depositRatePercent} onChange={(e) => set("depositRatePercent", e.target.value)} required />
           <p className="field__hint">
-            {deposit ? `Clients lock ${formatTryAmount(deposit)} in escrow when they book.` : "Typical rate 20-30%. Held in escrow by Trustless Work."}
+            {deposit
+              ? `Clients lock ${formatTryAmount(deposit)} in escrow when they book.`
+              : previewFailed
+                ? "We couldn't preview that deposit. Fix the price or rate before sending."
+                : "Typical rate 20-30%. Held in escrow by Trustless Work."}
           </p>
-          {details.depositRateBps && <p className="field__error">{details.depositRateBps}</p>}
+          {(details.depositRateBps || previewDetails.depositRateBps) && (
+            <p className="field__error">{details.depositRateBps ?? previewDetails.depositRateBps}</p>
+          )}
         </div>
       </div>
       <div className="apply-form__row">
