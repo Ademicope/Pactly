@@ -47,6 +47,7 @@ export function formatSlotDayShort(startsAt: number): string {
 
 export interface SlotDayGroup {
   dayLabel: string;
+  dateISO: string;
   slots: number[];
 }
 
@@ -55,12 +56,14 @@ export interface SlotDayGroup {
 export function groupSlotsByDay(slots: number[], timeZone?: string): SlotDayGroup[] {
   const groups: SlotDayGroup[] = [];
   for (const slot of slots) {
-    const dayLabel = formatSlotDay(slot, timeZone);
+    const date = new Date(slot * 1000);
+    const dayLabel = date.toLocaleDateString(undefined, DAY_FORMAT);
+    const dateISO = date.toISOString().slice(0, 10);
     const currentGroup = groups[groups.length - 1];
     if (currentGroup && currentGroup.dayLabel === dayLabel) {
       currentGroup.slots.push(slot);
     } else {
-      groups.push({ dayLabel, slots: [slot] });
+      groups.push({ dayLabel, dateISO, slots: [slot] });
     }
   }
   return groups;

@@ -242,6 +242,15 @@ const STATEMENTS: readonly string[] = [
     reason TEXT NOT NULL,
     created_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS waitlist_entries (
+    id TEXT PRIMARY KEY,
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    client_wallet_address TEXT NOT NULL,
+    date TEXT NOT NULL,
+    note TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE (provider_profile_id, client_wallet_address, date)
+  )`,
 ];
 
 /** `true` when `table` already has a column named `column` -- `PRAGMA
@@ -390,25 +399,9 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "escrow_dispute_openings", "opened_by_role")) {
     sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN opened_by_role TEXT`);
   }
-  // Issue #22: a dispute note and an evidence hash the opener can attach.
-  if (!hasColumn(sqlite, "escrow_dispute_openings", "note")) {
-    sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN note TEXT`);
-  }
-  if (!hasColumn(sqlite, "escrow_dispute_openings", "evidence_hash")) {
-    sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN evidence_hash TEXT`);
-  }
-
-  // Issue #31: one in-app event row per party per booking-level action
-  // (lock, release, dispute, resolve), visible to each party on bookings
-  // they belong to.
-  if (!hasColumn(sqlite, "escrow_events", "id")) {
-    sqlite.exec(`CREATE TABLE IF NOT EXISTS escrow_events (
-      id TEXT PRIMARY KEY,
-      booking_id TEXT NOT NULL REFERENCES bookings(id),
-      wallet_address TEXT NOT NULL,
-      type TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    )`);
+  // Issue #44: dispute withdrawal -- preserve the note on the withdrawn record
+  if (!hasColumn(sqlite, "escrow_dispute_openings", "withdrawn_at")) {
+    sqlite.exec(`ALTER TABLE escrow_dispute_openings ADD COLUMN withdrawn_at INTEGER`);
   }
 
   // Story 3.7: paying the balance before the session -- independent of the

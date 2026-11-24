@@ -11,6 +11,7 @@ import {
   releaseDeposit,
   submitBalancePayment,
   submitSignedTransaction,
+  withdrawDispute,
 } from "../api/hooks";
 import { isFreeCancelOpen } from "../lib/serverCancel";
 import { LOCAL_CURRENCY_UNAVAILABLE_NOTE } from "../lib/money";
@@ -64,6 +65,10 @@ export interface BookingActionsProps {
    * open -- never the browser clock alone. Resynced on each refetch. */
   serverTime?: number;
   session?: Session;
+  /** Issue #44: the wallet address that opened the dispute (when one is
+   * open and unresolved). Used to show "Withdraw dispute" to the opener
+   * only. */
+  disputeOpenedByWallet?: string | null;
   /** Called once an action's signed transaction has actually been relayed
    * (escrow actions), or once a balance action's own final outcome is
    * known -- the caller's own cue to refetch its list/view. May return the
@@ -199,6 +204,7 @@ export function BookingActions({
    * of this booking confirms it is still `unpaid`, so the client can never
    * fire a second real payment while the first one's outcome is unknown. */
   const [verifyingBalance, setVerifyingBalance] = useState(false);
+  const [withdrawConfirm, setWithdrawConfirm] = useState(false);
   const formatTryAmount = useFormatTry();
 
   function describeFailure(error: unknown): string {
@@ -453,15 +459,18 @@ export function BookingActions({
     }
   }
 
-  /** "Mark arrived" (provider only) -- the shop records when the client walks
-   * in, at or after the appointment start. No signature needed. */
-  async function handleMarkArrived(): Promise<void> {
+  async function handleWithdrawDispute(): Promise<void> {
     if (!session || busyAction) return;
-    setBusyAction("mark-arrived");
+    setBusyAction("withdraw-dispute");
     setNotice(undefined);
+    setWithdrawConfirm(false);
     try {
-      await markBookingArrived(id, session);
-      setNotice({ text: "Marked arrived." });
+      const result = await withdrawDispute(id, session);
+      if (result.escrowState === "locked") {
+        setNotice({ text: "Dispute withdrawn. The booking is back to locked." });
+      } else {
+        setNotice({ text: "Dispute could not be withdrawn -- it may have already been resolved." });
+      }
       onActionSubmitted?.();
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -494,7 +503,13 @@ export function BookingActions({
   const appointmentNotStarted = slotStartsAt === null || slotStartsAt > Math.floor(Date.now() / 1000);
   const canPayBalance = canAct && viewer === "client" && balanceState === "unpaid" && hasBalanceToPay && appointmentNotStarted && !verifyingBalance;
   const canMarkCash = canAct && viewer === "provider" && balanceState === "unpaid" && hasBalanceToPay;
-  const canMarkArrived = canAct && viewer === "provider" && arrivedAt === null && !appointmentNotStarted;
+  // Issue #44: can withdraw dispute if the viewer is the opener and the dispute is unresolved
+  const canWithdrawDispute = Boolean(session) && 
+    escrowState !== "refunded" && 
+    escrowState !== "released" && 
+    lifecycle.action === "disputed" && 
+    disputeOpenedByWallet === session.walletAddress && 
+    !isPending;
   const isBusy = busyAction !== undefined;
 
   if (isPending) {
@@ -760,6 +775,26 @@ export function BookingActions({
         >
           {notice.text}
         </p>
+      )}
+
+      {canWithdrawDispute && disputeStep.kind === "idle" && (
+        <div className="booking-card__dispute-panel">
+          <p>You opened this dispute. You can withdraw it to restore the booking to locked -- the deposit stays where it was, and the dispute note remains on record.</p>
+          {withdrawConfirm ? (
+            <div className="booking-card__actions">
+              <button type="button" className="button-primary" disabled={isBusy} onClick={() => void handleWithdrawDispute()}>
+                {busyAction === "withdraw-dispute" ? "Withdrawing…" : "Confirm withdrawal"}
+              </button>
+              <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setWithdrawConfirm(false)}>
+                Never mind
+              </button>
+            </div>
+          ) : (
+            <button type="button" className="button-ghost" disabled={isBusy} onClick={() => setWithdrawConfirm(true)}>
+              Withdraw dispute
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

@@ -180,6 +180,7 @@ export async function listApprovedProviderProfilesForDiscover(
       cancellationWindowHours: providerProfiles.cancellationWindowHours,
       minimumNoticeMinutes: providerProfiles.minimumNoticeMinutes,
       bufferMinutes: providerProfiles.bufferMinutes,
+      minimumNoticeMinutes: providerProfiles.minimumNoticeMinutes,
       isApproved: providerProfiles.isApproved,
       bookingsPaused: providerProfiles.bookingsPaused,
       timezone: providerProfiles.timezone,

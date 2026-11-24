@@ -58,9 +58,7 @@ export interface ListFutureSlotsOptions {
    * days"). Omitted entirely for a provider's own view, which sees every
    * future slot regardless of how far out it is. */
   withinSeconds?: number;
-  /** Issue #36: drops every slot that starts sooner than this many minutes
-   * from `now` (the shop's own minimum-notice setting). `0`/omitted keeps
-   * every future slot. */
+  /** Issue #36: minimum notice in minutes -- slots sooner than this are excluded. */
   minimumNoticeMinutes?: number;
 }
 

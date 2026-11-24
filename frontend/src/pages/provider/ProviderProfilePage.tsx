@@ -1,8 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 
-import { saveShop, unsaveShop, useIsShopSaved, usePublicProviderProfile } from "../../api/hooks";
-import { submitShopReport, usePublicProviderProfile } from "../../api/hooks";
+import { joinWaitlist, submitShopReport, usePublicProviderProfile } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import { DepositPill } from "../../components/DepositPill";
 import { ProviderHeader } from "../../components/ProviderHeader";
@@ -11,7 +10,6 @@ import { TryAmount } from "../../components/TryAmount";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSessionFormat } from "../../lib/sessionFormat";
 import { formatSlotDay, groupSlotsByDay } from "../../lib/time";
-import { groupSlotsByDay } from "../../lib/time";
 import { getSession, type Session } from "../../wallet";
 
 /** `/providers/:id` -- a public profile, no sign-in required
@@ -29,12 +27,12 @@ export function ProviderProfilePage() {
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportNotice, setReportNotice] = useState<{ text: string; isError: boolean } | undefined>();
 
-  const [session] = useState<Session | undefined>(() => getSession());
-  const { data: savedData, refetch: refetchSaved } = useIsShopSaved(id, session);
-  const [savingState, setSavingState] = useState<"idle" | "saving" | "unsaving">("idle");
-  const [saveNotice, setSaveNotice] = useState<string | undefined>();
-
-  const isSaved = savedData?.isSaved ?? false;
+  // Waitlist state
+  const [showWaitlistDialog, setShowWaitlistDialog] = useState(false);
+  const [waitlistDate, setWaitlistDate] = useState<string | undefined>();
+  const [waitlistNote, setWaitlistNote] = useState("");
+  const [waitlistSubmitting, setWaitlistSubmitting] = useState(false);
+  const [waitlistNotice, setWaitlistNotice] = useState<{ text: string; isError: boolean } | undefined>();
 
   // `?slot=<epochSeconds>` pre-selects that slot when it matches an open
   // one; any other value (unknown, stale, malformed) is silently ignored
@@ -115,6 +113,48 @@ export function ProviderProfilePage() {
     }
   }
 
+  async function handleWaitlistSubmit(): Promise<void> {
+    if (!session || !id || !waitlistDate) return;
+    
+    setWaitlistSubmitting(true);
+    setWaitlistNotice(undefined);
+    
+    try {
+      await joinWaitlist(id, waitlistDate, waitlistNote.trim() || undefined, session);
+      setWaitlistNotice({ text: "You've been added to the waitlist. The shop will see your request.", isError: false });
+      setWaitlistNote("");
+      setTimeout(() => {
+        setShowWaitlistDialog(false);
+        setWaitlistNotice(undefined);
+      }, 2000);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.code === "ALREADY_WAITLISTED") {
+          setWaitlistNotice({ text: "You're already on the waitlist for this date.", isError: true });
+        } else if (err.code === "SLOTS_AVAILABLE") {
+          setWaitlistNotice({ text: "This date now has open slots. Please book one instead.", isError: true });
+        } else if (err.code === "INVALID_DATE") {
+          setWaitlistNotice({ text: "Invalid date format.", isError: true });
+        } else if (err.code === "INVALID_NOTE") {
+          setWaitlistNotice({ text: "Note must be 300 characters or less.", isError: true });
+        } else if (err.code === "PROVIDER_NOT_FOUND") {
+          setWaitlistNotice({ text: "This shop is no longer available.", isError: true });
+        } else {
+          setWaitlistNotice({ text: "Something went wrong. Try again.", isError: true });
+        }
+      } else {
+        setWaitlistNotice({ text: "Connection dropped. Try again.", isError: true });
+      }
+    } finally {
+      setWaitlistSubmitting(false);
+    }
+  }
+
+  function openWaitlistDialog(date: string): void {
+    setWaitlistDate(date);
+    setShowWaitlistDialog(true);
+  }
+
   if (isLoading) {
     return (
       <div className="page">
@@ -141,10 +181,11 @@ export function ProviderProfilePage() {
     return null;
   }
 
-  const dayGroups = groupSlotsByDay(profile.slots);
+const dayGroups = groupSlotsByDay(profile.slots);
   
   const canSave = session && profile.isApproved;
   const canReport = session && profile.isApproved;
+  const canWaitlist = session && profile.isApproved;
 
   return (
     <div className="page">
@@ -225,6 +266,16 @@ export function ProviderProfilePage() {
                       timeZone={profile.timezone}
                     />
                   ))}
+                  {group.slots.length === 0 && canWaitlist && (
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      style={{ fontSize: "var(--text-14)" }}
+                      onClick={() => openWaitlistDialog(group.dateISO)}
+                    >
+                      Join waitlist
+                    </button>
+                  )}
                 </div>
               </div>
             ))
@@ -316,6 +367,67 @@ export function ProviderProfilePage() {
                   setReportNotice(undefined);
                 }}
                 disabled={reportSubmitting}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showWaitlistDialog && waitlistDate && (
+        <div className="modal-overlay" onClick={() => setShowWaitlistDialog(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ marginBottom: "var(--space-4)" }}>Join waitlist for {waitlistDate}</h2>
+            <p style={{ marginBottom: "var(--space-4)", color: "var(--color-text-secondary)" }}>
+              This date has no open slots. Add yourself to the waitlist and the shop will see your request.
+            </p>
+            
+            {waitlistNotice && (
+              <div className={waitlistNotice.isError ? "banner banner--alert" : "banner"} style={{ marginBottom: "var(--space-4)" }}>
+                <p>{waitlistNotice.text}</p>
+              </div>
+            )}
+            
+            <textarea
+              value={waitlistNote}
+              onChange={(e) => setWaitlistNote(e.target.value)}
+              placeholder="Optional note for the shop (max 300 characters)"
+              maxLength={300}
+              rows={4}
+              style={{
+                width: "100%",
+                padding: "var(--space-3)",
+                fontSize: "var(--text-16)",
+                fontFamily: "inherit",
+                border: "1px solid var(--color-border)",
+                borderRadius: "var(--radius-2)",
+                marginBottom: "var(--space-2)",
+              }}
+              disabled={waitlistSubmitting}
+            />
+            
+            <p style={{ fontSize: "var(--text-14)", color: "var(--color-text-secondary)", marginBottom: "var(--space-4)" }}>
+              {waitlistNote.length}/300 characters
+            </p>
+            
+            <div style={{ display: "flex", gap: "var(--space-3)" }}>
+              <button
+                type="button"
+                className="button-primary"
+                onClick={handleWaitlistSubmit}
+                disabled={waitlistSubmitting}
+              >
+                {waitlistSubmitting ? "Adding…" : "Join waitlist"}
+              </button>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => {
+                  setShowWaitlistDialog(false);
+                  setWaitlistNotice(undefined);
+                }}
+                disabled={waitlistSubmitting}
               >
                 Cancel
               </button>
