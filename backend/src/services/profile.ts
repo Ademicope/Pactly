@@ -187,7 +187,11 @@ export class InvalidSuspensionReasonError extends Error {
 
 export interface ProviderRulesInput {
   priceAmount: string;
-  depositRateBps: number;
+  /**
+   * Deposit as basis points of the session price. When omitted on update,
+   * the shop keeps the rate it already has (Issue #117).
+   */
+  depositRateBps?: number;
   cancellationWindowHours: number;
   /** Issue #36: minimum notice in minutes (0-10080, i.e. 0-7 days). */
   minimumNoticeMinutes?: number;
@@ -216,13 +220,15 @@ export function validateProviderRules(input: ProviderRulesInput): Record<string,
   if (typeof input.priceAmount !== "string" || !POSITIVE_INTEGER_STRING.test(input.priceAmount)) {
     details.priceAmount = "Price must be a positive integer string, in USDC's smallest unit.";
   }
-  if (
-    typeof input.depositRateBps !== "number" ||
-    !Number.isInteger(input.depositRateBps) ||
-    input.depositRateBps < MIN_DEPOSIT_RATE_BPS ||
-    input.depositRateBps > MAX_DEPOSIT_RATE_BPS
-  ) {
-    details.depositRateBps = `Deposit rate must be a whole number of basis points between ${MIN_DEPOSIT_RATE_BPS} and ${MAX_DEPOSIT_RATE_BPS}.`;
+  if (input.depositRateBps !== undefined) {
+    if (
+      typeof input.depositRateBps !== "number" ||
+      !Number.isInteger(input.depositRateBps) ||
+      input.depositRateBps < MIN_DEPOSIT_RATE_BPS ||
+      input.depositRateBps > MAX_DEPOSIT_RATE_BPS
+    ) {
+      details.depositRateBps = `Deposit rate must be a whole number of basis points between ${MIN_DEPOSIT_RATE_BPS} and ${MAX_DEPOSIT_RATE_BPS}.`;
+    }
   }
   if (
     typeof input.cancellationWindowHours !== "number" ||
@@ -256,7 +262,11 @@ export function validateProviderRules(input: ProviderRulesInput): Record<string,
 
   // Only checked once the two inputs it depends on are themselves valid --
   // otherwise `computeDepositAmount` could be handed a non-numeric string.
-  if (details.priceAmount === undefined && details.depositRateBps === undefined) {
+  if (
+    details.priceAmount === undefined &&
+    details.depositRateBps === undefined &&
+    typeof input.depositRateBps === "number"
+  ) {
     const deposit = computeDepositAmount(input.priceAmount, input.depositRateBps);
     if (BigInt(deposit) <= 0n) {
       details.depositRateBps = "The deposit would round to zero. Raise the price or the deposit rate.";
@@ -478,13 +488,15 @@ export async function updateProviderRules(
   if (!profile) {
     throw new NotAProviderError();
   }
-  const details = validateProviderRules(input);
+  const depositRateBps = input.depositRateBps ?? profile.depositRateBps;
+  const resolved: ProviderRulesInput = { ...input, depositRateBps };
+  const details = validateProviderRules(resolved);
   if (Object.keys(details).length > 0) {
     throw new InvalidProviderRulesError(details);
   }
   await updateProviderProfileRules(db, profile.id, {
     priceAmount: input.priceAmount,
-    depositRateBps: input.depositRateBps,
+    depositRateBps,
     cancellationWindowHours: input.cancellationWindowHours,
     bufferMinutes: input.bufferMinutes ?? 0,
   });

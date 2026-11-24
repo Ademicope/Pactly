@@ -254,6 +254,29 @@ test("getOwnProviderProfile throws NotAProviderError for a wallet with no provid
   }
 });
 
+test("updateProviderRules keeps the existing deposit rate when depositRateBps is omitted", async () => {
+  const result = openTestDatabase();
+  try {
+    const walletAddress = "GKEEPDEPOSITRATE1";
+    await seedProviderProfile(result, {
+      walletAddress,
+      priceAmount: "10000000",
+      depositRateBps: 2000,
+      cancellationWindowHours: 24,
+    });
+    const view = await updateProviderRules(result.db, walletAddress, {
+      priceAmount: "12000000",
+      cancellationWindowHours: 48,
+    });
+    assert.equal(view.depositRateBps, 2000);
+    assert.equal(view.price.amount, "12000000");
+    assert.equal(view.deposit.amount, "2400000");
+    assert.equal(view.cancellationWindowHours, 48);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
 test("updateProviderRules saves valid rules and returns the recomputed deposit", async () => {
   const result = openTestDatabase();
   try {
