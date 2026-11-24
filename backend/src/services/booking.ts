@@ -2390,11 +2390,9 @@ export interface BookingListItemBase {
   serverTime: number;
   contractId: string | null;
   holdExpiresAt: number | null;
-  /** UTC epoch seconds when the shop declined this hold, `null` otherwise.
-   * A declined hold is never an expired one. */
-  declinedAt: number | null;
-  /** Issue #35: true when this read triggered showing a reminder. */
-  reminderShown: boolean;
+  /** Set when a shop's close-date action released this unpaid hold early;
+   * the client's card says so instead of showing a bare expiry. */
+  holdReleasedReason: BookingRow["holdReleaseReason"];
   /** The AD-13 hold's own 10-minute window has passed with `escrowState`
    * still `null` -- the spec's own "Always" rule: "An expired, never-funded
    * hold is listed under 'Expired holds' (collapsed), never as a booking."
@@ -2467,8 +2465,7 @@ function toBookingListItemBase(
     serverTime: now,
     contractId: booking.escrowContractId,
     holdExpiresAt: booking.holdExpiresAt,
-    declinedAt: booking.declinedAt,
-    reminderShown,
+    holdReleasedReason: booking.holdReleaseReason,
     isExpiredHold: isExpiredHoldRow(booking, now),
     arrivedAt: booking.arrivedAt,
   };

@@ -280,9 +280,12 @@ export function useHoldSlot() {
   });
 }
 
-/** Gives back the caller's own unlocked hold; the slot is free again. */
-export function cancelHold(bookingId: string, session: Session): Promise<{ ok: true }> {
-  return apiDelete<{ ok: true }>(`/bookings/${bookingId}/hold`, session.token);
+/** `POST /bookings/:id/reschedule` -- move a locked booking to another open
+ * slot of the same shop while inside its free-cancellation window. The
+ * escrow contract, amount and parties are untouched; no second escrow is
+ * deployed. */
+export function rescheduleBooking(bookingId: string, slotStartsAt: number, session: Session): Promise<BookingView> {
+  return apiPost<BookingView>(`/bookings/${bookingId}/reschedule`, { slotStartsAt }, session.token);
 }
 
 export function lockDeposit(bookingId: string, session: Session, rebuild = false): Promise<LockResponse> {

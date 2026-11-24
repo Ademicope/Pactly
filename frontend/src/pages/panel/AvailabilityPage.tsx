@@ -6,13 +6,10 @@ import { ApiError, apiDownload } from "../../api/client";
 import { PageMasthead } from "../../components/PageMasthead";
 import { SignInPanel } from "../../components/SignInPanel";
 import {
-  useClosedDates,
-  useCloseDate,
+  closeProviderDate,
   useOwnProviderProfile,
-  useReopenDate,
   useTryRate,
   useUpdateProviderAvailability,
-  useUpdateProviderProfile,
   useUpdateProviderRules,
 } from "../../api/hooks";
 import { TryAmount } from "../../components/TryAmount";
