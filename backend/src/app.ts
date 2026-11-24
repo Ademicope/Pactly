@@ -163,6 +163,7 @@ import {
   type ConfirmedQuote,
   type LocalDepositDeps,
 } from "./services/localDeposit.js";
+import { retryFailedDeposit } from "./services/localDeposit.js";
 import {
   ShopNotFoundError as SavedShopNotFoundError,
   ShopNotApprovedError,
@@ -1414,6 +1415,24 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
         ...localDepositDeps,
         confirmedQuote,
       });
+      return c.json(result);
+    } catch (error) {
+      const mapped = localDepositErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
+  // Story #19: retry a failed anchor deposit without starting a new hold
+  app.post("/bookings/:id/deposit/local/retry", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    try {
+      await ensureCustodialReady(c.get("walletAddress"));
+      const booking = await getBookingForClient(db, bookingId, c.get("walletAddress"));
+      const result = await retryFailedDeposit(db, booking, c.get("walletAddress"), localDepositDeps);
       return c.json(result);
     } catch (error) {
       const mapped = localDepositErrorResponse(error, c);

@@ -685,6 +685,39 @@ export function BookingPage() {
     }
   }
 
+  async function retryFailedDeposit(): Promise<void> {
+    if (!hold || !session || !localDeposit) return;
+    setLocalBusy(true);
+    setLocalNotice(undefined);
+    try {
+      const result = await fetch(`/api/bookings/${hold.bookingId}/deposit/local/retry`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.token}`,
+        },
+      }).catch(() => {
+        setLocalNotice("Connection error. Try again.");
+      });
+      if (result?.ok) {
+        const data = await result.json();
+        setLocalDeposit(data);
+        if (data.holdExpiresAt) {
+          setHold((current) => (current ? { ...current, holdExpiresAt: data.holdExpiresAt ?? current.holdExpiresAt } : current));
+        }
+      }
+    } catch (error) {
+      const message = localDepositErrorMessage(error);
+      if (message === "unauthorized") {
+        handleUnauthorized();
+        return;
+      }
+      setLocalNotice(message);
+    } finally {
+      setLocalBusy(false);
+    }
+  }
+
   const localReceived = localDeposit?.status === "received";
   // "Lock with Pactly" only ever appears once the bank transfer is in.
   const showLock = Boolean(hold) && localReceived;
@@ -878,7 +911,7 @@ export function BookingPage() {
                     amount={depositAmount}
                     busy={localBusy}
                     onSimulate={() => void handleSimulate()}
-                    onRetry={() => void startLocalCurrency()}
+                    onRetry={() => void retryFailedDeposit()}
                   />
                 )}
                 {localReceived && (
