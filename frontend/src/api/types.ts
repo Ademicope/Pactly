@@ -50,6 +50,8 @@ export interface ProviderProfile {
   cancellationWindowHours: number;
   bufferMinutes: number;
   verifiedSessionCount: number;
+  /** Issue #2: shown beside the verified-session line; zero is shown. */
+  providerCancellationCount: number;
   isApproved: boolean;
   /** A suspended shop is absent from discovery/search and cannot take a
    * new hold; its own panel still reads this view to show the reason. */
@@ -57,6 +59,18 @@ export interface ProviderProfile {
   suspensionReason: string | null;
   /** UTC epoch seconds, ascending. */
   slots: number[];
+  /** Issue #3: verified reviews, newest first. An empty list stays empty. */
+  reviews: ProviderReview[];
+}
+
+/** One client review, tied to the released booking it came from. */
+export interface ProviderReview {
+  id: string;
+  bookingId: string;
+  rating: number;
+  comment: string;
+  /** UTC epoch seconds. */
+  createdAt: number;
 }
 
 /** `GET/PUT/DELETE /me/provider/closed-dates` -- the shop's one-off
@@ -102,8 +116,17 @@ export interface ProviderCard {
   earliestSlots: number[];
 }
 
+/** Issue #30: what an empty text search offers -- the nearest category
+ * that has approved shops and up to three of them. Absent when no approved
+ * shop exists at all (the empty state then stays empty). */
+export interface EmptySearchSuggestions {
+  category: Category;
+  providers: ProviderCard[];
+}
+
 export interface ProvidersResponse {
   providers: ProviderCard[];
+  suggestions?: EmptySearchSuggestions;
 }
 
 /** `GET /providers/suggest?q=`'s Story 3.3 shape -- mirrors
@@ -473,6 +496,52 @@ export type OpenLocalDepositResponse = { needsTrustline: true; unsignedXdr: stri
 export interface AnchorChallengeResponse {
   authenticated: boolean;
   unsignedXdr?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1 (Story 2.3): provider cash-out. Mirrors
+// `backend/src/services/cashOut.ts`'s view shapes.
+// ---------------------------------------------------------------------------
+
+export interface CashOutLimits {
+  min?: string;
+  max?: string;
+  currency?: string;
+}
+
+export interface CashOutBalance {
+  /** Integer string, USDC smallest units; `"0"` without a trustline. */
+  balance: string;
+  asset: string;
+  /** Whether the wallet can hold the anchor's USDC at all. */
+  hasTrustline: boolean;
+  limits?: CashOutLimits;
+}
+
+export type CashOutStatus = "awaiting_signature" | "waiting" | "sent" | "paid_out" | "failed";
+
+export interface CashOutView {
+  id: string;
+  status: CashOutStatus;
+  statusLabel: string;
+  amount: Money;
+  fiat: { amount: string; currency: string };
+  anchorTransactionId: string;
+  moreInfoUrl?: string;
+  /** UTC epoch seconds. */
+  createdAt: number;
+  sentAt?: number;
+  reason?: string;
+  stale?: boolean;
+}
+
+export interface CashOutsResponse {
+  cashOuts: CashOutView[];
+}
+
+export interface StartCashOutResponse {
+  cashOutId: string;
+  unsignedXdr: string;
 }
 
 // ---------------------------------------------------------------------------

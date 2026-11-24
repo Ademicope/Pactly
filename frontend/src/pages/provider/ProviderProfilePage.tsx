@@ -10,6 +10,7 @@ import { SlotChip } from "../../components/SlotChip";
 import { TryAmount } from "../../components/TryAmount";
 import { providerPhotoSrc } from "../../lib/providerPhotos";
 import { formatSessionFormat } from "../../lib/sessionFormat";
+import { formatSlotDay, groupSlotsByDay } from "../../lib/time";
 import { groupSlotsByDay } from "../../lib/time";
 import { getSession, type Session } from "../../wallet";
 
@@ -154,6 +155,7 @@ export function ProviderProfilePage() {
         categoryName={profile.category.name}
         isApproved={profile.isApproved}
         verifiedSessionCount={profile.verifiedSessionCount}
+        providerCancellationCount={profile.providerCancellationCount}
         photoSrc={providerPhotoSrc(profile.id)}
       />
 
@@ -232,6 +234,29 @@ export function ProviderProfilePage() {
         )}
       </div>
 
+      {/* Issue #3: verified reviews, newest first (the backend already
+       * orders them). An empty list stays empty -- there is no placeholder
+       * rating and never a fabricated one. Each review links back to the
+       * booking it came from, in the client's own bookings list. */}
+      <section className="card" style={{ marginTop: "var(--space-6)" }}>
+        <h2 style={{ fontSize: "var(--text-18)" }}>Reviews</h2>
+        {profile.reviews.length === 0 ? (
+          <p className="banner">No reviews yet.</p>
+        ) : (
+          <ul className="review-list">
+            {profile.reviews.map((review) => (
+              <li key={review.id} className="review-list__item">
+                <p className="review-list__rating">{review.rating} out of 5</p>
+                {review.comment && <p className="review-list__comment">{review.comment}</p>}
+                <p className="review-list__meta">
+                  {formatSlotDay(review.createdAt)} ·{" "}
+                  <Link to={`/me/bookings#booking-${review.bookingId}`}>View the booking</Link>
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       {showReportDialog && (
         <div className="modal-overlay" onClick={() => setShowReportDialog(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>

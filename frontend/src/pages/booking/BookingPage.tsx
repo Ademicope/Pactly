@@ -1079,6 +1079,7 @@ export function BookingPage() {
             categoryName={profile.category.name}
             isApproved={profile.isApproved}
             verifiedSessionCount={profile.verifiedSessionCount}
+            providerCancellationCount={profile.providerCancellationCount}
             photoSrc={providerPhotoSrc(profile.id)}
             compact
           />

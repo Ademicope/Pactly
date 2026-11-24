@@ -71,6 +71,7 @@ import {
   markClientReminderShown,
   markProviderReminderShown,
   recordDeploySubmission,
+  recordProviderCancellationCountedSync,
   setEscrowActionSubmittedAt,
   setBalancePaymentBuiltHash,
   setEscrowActionTxHash,
@@ -90,6 +91,7 @@ import { insertAdminDecisionAuditSync } from "../db/adminDecisionAudit.js";
 import { getEscrowDisputeOpeningsForBookings, recordEscrowDisputeOpening } from "../db/escrowDisputeOpenings.js";
 import { recordEscrowEventForBothParties } from "../db/escrowEvents.js";
 import { getProviderProfileById, getProviderProfileByWallet } from "../db/providerProfiles.js";
+import { getReviewByBookingId, getReviewsForBookings, toReviewView, type ReviewView } from "../db/reviews.js";
 import { computeDepositAmount, NotAProviderError, ProviderNotFoundError } from "./profile.js";
 import { resolveUsdcAsset, type ResolveUsdcAssetOptions, type UsdcAsset } from "../anchor/usdc.js";
 import {
@@ -1941,6 +1943,17 @@ export async function submitSignedTransaction(
         txHash: hash,
         openedAt: now,
       });
+      // Issue #2: the provider's cancellation counter moves only when the
+      // provider is the cancelling party -- the reason the dispute was opened
+      // under is what names that, never who pressed the button (either side
+      // may report a provider cancellation). The booking-level marker makes
+      // this once-only. A client cancel, a no-show, a plain disagreement and
+      // every refund/release path leave it untouched.
+      if (booking.pendingDisputeReason === "provider-cancel") {
+        db.transaction((tx) => {
+          recordProviderCancellationCountedSync(tx, bookingId, booking.providerProfileId, now);
+        });
+      }
     }
     await setEscrowActionSubmittedAt(db, bookingId, "dispute", now);
   } else if (match.kind === "complete" || match.kind === "approve" || match.kind === "release" || match.kind === "resolve") {
@@ -2125,6 +2138,10 @@ export async function listBookingsForClient(
   const lifecycleByBooking = await getEscrowLifecycleForBookings(
     db,
     rows.map((row) => row.booking),
+  );
+  const reviewByBooking = await getReviewsForBookings(
+    db,
+    rows.map((row) => row.booking.id),
   );
   const providerIds = [...new Set(rows.map((row) => row.booking.providerProfileId))];
   const profiles = await Promise.all(providerIds.map((id) => getProviderProfileById(db, id)));

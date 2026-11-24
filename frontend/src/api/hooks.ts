@@ -40,6 +40,7 @@ import type {
   OwnProviderApplicationResponse,
   ProviderApplicationInput,
   ProviderApplicationOutcome,
+  ProviderReview,
   RateResponse,
   SaveShopResponse,
   UnsaveShopResponse,
@@ -512,6 +513,50 @@ export function getLocalDeposit(bookingId: string, session: Session): Promise<Lo
 
 export function simulateLocalDeposit(bookingId: string, session: Session): Promise<LocalDepositView> {
   return apiPost<LocalDepositView>(`/bookings/${bookingId}/deposit/local/simulate`, {}, session.token);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1 (Story 2.3): provider cash-out. The balance and the list are
+// cached queries; start/submit are imperative because each waits on a
+// wallet signature.
+// ---------------------------------------------------------------------------
+
+const CASH_OUT_KEY = (walletAddress: string | undefined) => ["me", "provider", "cash-out", walletAddress] as const;
+
+export function useCashOutBalance(session: Session | undefined) {
+  return useQuery({
+    queryKey: [...CASH_OUT_KEY(session?.walletAddress), "balance"],
+    queryFn: () => apiGet<CashOutBalance>("/me/provider/cash-out/balance", session?.token),
+    enabled: Boolean(session),
+  });
+}
+
+export function useCashOuts(session: Session | undefined) {
+  return useQuery({
+    queryKey: [...CASH_OUT_KEY(session?.walletAddress), "list"],
+    queryFn: () => apiGet<CashOutsResponse>("/me/provider/cash-outs", session?.token),
+    enabled: Boolean(session),
+  });
+}
+
+export function requestCashOutAnchorChallenge(session: Session): Promise<AnchorChallengeResponse> {
+  return apiPost<AnchorChallengeResponse>("/me/provider/anchor/challenge", {}, session.token);
+}
+
+export function verifyCashOutAnchorChallenge(signedXdr: string, session: Session): Promise<{ ok: true }> {
+  return apiPost<{ ok: true }>("/me/provider/anchor/verify", { signedXdr }, session.token);
+}
+
+export function startCashOut(amount: string, session: Session): Promise<StartCashOutResponse> {
+  return apiPost<StartCashOutResponse>("/me/provider/cash-out", { amount }, session.token);
+}
+
+export function submitCashOut(cashOutId: string, signedXdr: string, session: Session): Promise<CashOutView> {
+  return apiPost<CashOutView>(`/me/provider/cash-out/${encodeURIComponent(cashOutId)}/submit`, { signedXdr }, session.token);
+}
+
+export function getCashOut(cashOutId: string, session: Session): Promise<CashOutView> {
+  return apiGet<CashOutView>(`/me/provider/cash-out/${encodeURIComponent(cashOutId)}`, session.token);
 }
 
 // ---------------------------------------------------------------------------

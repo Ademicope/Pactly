@@ -125,7 +125,7 @@ import {
   submitSignedTransaction,
   type BuildBalancePaymentDeps,
 } from "./services/booking.js";
-import { InvalidCloseDateError, closeProviderDate } from "./services/availability.js";
+import { InvalidReviewError, ReviewExistsError, createReview } from "./services/reviews.js";
 import { EscrowApiError, EscrowConfigError, EscrowRequestError } from "./escrow/trustless-work/errors.js";
 import { defaultEscrowAdapter } from "./escrow/trustless-work/client.js";
 import type { EscrowAdapter } from "./escrow/interface.js";
@@ -157,6 +157,20 @@ import {
   reopenDate,
 } from "./services/availability.js";
 import type { AnchorFetchLike } from "./anchor/http.js";
+import {
+  CashOutNotFoundError,
+  InsufficientBalanceError,
+  beginCashOutAnchorAuth,
+  completeCashOutAnchorAuth,
+  InvalidCashOutAmountError,
+  getCashOut,
+  getCashOutBalance,
+  listCashOuts,
+  pollCashOut,
+  startCashOut,
+  submitCashOut,
+  type CashOutDeps,
+} from "./services/cashOut.js";
 import {
   SandboxOnlyError,
   beginBookingAnchorAuth,
@@ -320,6 +334,10 @@ export interface CreateAppOptions {
    * path makes (toml, SEP-10/12/6, SEP-38 limits, Horizon trustline check,
    * change-trust build/submit) -- a test never reaches the live anchor. */
   localDepositDeps?: LocalDepositDeps;
+  /** Issue #1: overrides every network call the cash-out path makes (anchor
+   * SEP-6/12/38, Horizon balance, payment build/submit) -- a test never
+   * reaches the live anchor or RPC. */
+  cashOutDeps?: CashOutDeps;
   /** Passkey pivot: overrides the ceremony clock (`now`) so a test can
    * expire a challenge without waiting. */
   passkeyDeps?: PasskeyDeps;
@@ -345,6 +363,10 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
   const localDepositDeps: LocalDepositDeps = {
     ...options.localDepositDeps,
     fetchImpl: options.localDepositDeps?.fetchImpl ?? (quoteFetchImpl as AnchorFetchLike | undefined),
+  };
+  const cashOutDeps: CashOutDeps = {
+    ...options.cashOutDeps,
+    fetchImpl: options.cashOutDeps?.fetchImpl ?? localDepositDeps.fetchImpl,
   };
 
   // Security headers middleware -- sets three API headers (AC1) and ensures
@@ -726,7 +748,15 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     const category = c.req.query("category");
     const filters = parseDiscoverFilters(c);
     const providers = await listDiscoverProviders(db, category, filters);
-    return c.json({ providers });
+    // Issue #30: a search that matches nothing names the query already (the
+    // frontend echoes it) and points at the nearest category that does have
+    // approved shops, with up to three of them. Only a text search gets
+    // this -- a filter-only empty result keeps its existing empty state.
+    const suggestions =
+      providers.length === 0 && filters.query
+        ? await suggestProvidersForEmptySearch(db, filters, category)
+        : undefined;
+    return c.json(suggestions ? { providers, suggestions } : { providers });
   });
 
   /** Story 3.3: search suggestions. Registered before `/providers/:id` so
@@ -1540,6 +1570,161 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
       if (error instanceof NotAProviderError) {
         return c.json({ code: "NOT_A_PROVIDER", message: error.message }, 404);
       }
+      throw error;
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Issue #1 (Story 2.3): provider cash-out. Every route resolves the
+  // provider and the cash-out from the caller's own wallet alone, so
+  // another provider's id is indistinguishable from a missing one.
+  // ---------------------------------------------------------------------
+
+  function cashOutErrorResponse(error: unknown, c: Context<{ Variables: Variables }>) {
+    if (error instanceof NotAProviderError) {
+      return c.json({ code: "NOT_A_PROVIDER", message: error.message }, 404);
+    }
+    if (error instanceof CashOutNotFoundError) {
+      return c.json({ code: "CASH_OUT_NOT_FOUND", message: "That cash-out could not be found." }, 404);
+    }
+    if (error instanceof InvalidCashOutAmountError) {
+      return c.json({ code: "INVALID_AMOUNT", message: error.message }, 400);
+    }
+    if (error instanceof AmountOutOfRangeError) {
+      return c.json(
+        {
+          code: "AMOUNT_OUT_OF_RANGE",
+          message: error.message,
+          details: { min: error.min, max: error.max, currency: error.currency },
+        },
+        409,
+      );
+    }
+    if (error instanceof InsufficientBalanceError) {
+      return c.json({ code: "INSUFFICIENT_BALANCE", message: error.message }, 409);
+    }
+    if (error instanceof AnchorAuthRequiredError) {
+      return c.json({ code: "ANCHOR_AUTH_REQUIRED", message: "Sign in with the anchor to continue." }, 401);
+    }
+    if (error instanceof AnchorAuthError) {
+      return c.json({ code: "ANCHOR_AUTH_FAILED", message: "The wallet signature did not match. Try again." }, 401);
+    }
+    if (error instanceof XdrMismatchError) {
+      return c.json({ code: "XDR_MISMATCH", message: error.message }, 409);
+    }
+    if (error instanceof AnchorKycError) {
+      return c.json({ code: "ANCHOR_KYC_FAILED", message: "The anchor could not verify this wallet just now." }, 502);
+    }
+    if (error instanceof AnchorDepositError) {
+      console.error("[app] SEP-6 withdraw refused", error.message);
+      return c.json({ code: "ANCHOR_WITHDRAW_FAILED", message: "The cash-out could not be started." }, 502);
+    }
+    if (error instanceof AnchorUnavailableError || error instanceof AnchorDiscoveryError) {
+      return c.json({ code: "ANCHOR_UNAVAILABLE", message: "We couldn't reach the cash-out rail just now." }, 503);
+    }
+    if (error instanceof AnchorQuoteUnavailableError || error instanceof AnchorQuoteUnsupportedError) {
+      return c.json({ code: "QUOTE_UNAVAILABLE", message: "We couldn't check the cash-out limits just now." }, 503);
+    }
+    if (error instanceof PaymentFailedError) {
+      return c.json({ code: "PAYMENT_FAILED", message: "The cash-out payment was not accepted." }, 502);
+    }
+    if (error instanceof PaymentUnavailableError) {
+      console.error("[app] cash-out payment unavailable", error.message);
+      return c.json({ code: "PAYMENT_UNAVAILABLE", message: "We couldn't reach the network just now." }, 503);
+    }
+    return undefined;
+  }
+
+  app.post("/me/provider/anchor/challenge", requirePactlyAuth, async (c) => {
+    try {
+      return c.json(await beginCashOutAnchorAuth(db, c.get("walletAddress"), cashOutDeps));
+    } catch (error) {
+      const mapped = cashOutErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
+  app.post("/me/provider/anchor/verify", requirePactlyAuth, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const signedXdr = typeof body?.signedXdr === "string" ? body.signedXdr : "";
+    if (!signedXdr) {
+      return c.json({ code: "invalid_request", message: "signedXdr is required." }, 400);
+    }
+    try {
+      await completeCashOutAnchorAuth(db, c.get("walletAddress"), signedXdr, cashOutDeps);
+      return c.json({ ok: true });
+    } catch (error) {
+      const mapped = cashOutErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
+  app.get("/me/provider/cash-out/balance", requirePactlyAuth, async (c) => {
+    try {
+      return c.json(await getCashOutBalance(db, c.get("walletAddress"), cashOutDeps));
+    } catch (error) {
+      const mapped = cashOutErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
+  app.get("/me/provider/cash-outs", requirePactlyAuth, async (c) => {
+    try {
+      return c.json({ cashOuts: await listCashOuts(db, c.get("walletAddress")) });
+    } catch (error) {
+      const mapped = cashOutErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
+  app.post("/me/provider/cash-out", requirePactlyAuth, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const amount = typeof body?.amount === "string" ? body.amount.trim() : "";
+    if (!amount) {
+      return c.json({ code: "invalid_request", message: "amount is required." }, 400);
+    }
+    try {
+      return c.json(await startCashOut(db, c.get("walletAddress"), amount, cashOutDeps));
+    } catch (error) {
+      const mapped = cashOutErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
+  app.post("/me/provider/cash-out/:id/submit", requirePactlyAuth, async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => undefined);
+    const signedXdr = typeof body?.signedXdr === "string" ? body.signedXdr : "";
+    if (!id) {
+      return c.json({ code: "invalid_request", message: "cash-out id is required." }, 400);
+    }
+    if (!signedXdr) {
+      return c.json({ code: "invalid_request", message: "signedXdr is required." }, 400);
+    }
+    try {
+      return c.json(await submitCashOut(db, c.get("walletAddress"), id, signedXdr, cashOutDeps));
+    } catch (error) {
+      const mapped = cashOutErrorResponse(error, c);
+      if (mapped) return mapped;
+      throw error;
+    }
+  });
+
+  app.get("/me/provider/cash-out/:id", requirePactlyAuth, async (c) => {
+    const id = c.req.param("id");
+    if (!id) {
+      return c.json({ code: "invalid_request", message: "cash-out id is required." }, 400);
+    }
+    try {
+      return c.json(await getCashOut(db, c.get("walletAddress"), id, cashOutDeps));
+    } catch (error) {
+      const mapped = cashOutErrorResponse(error, c);
+      if (mapped) return mapped;
       throw error;
     }
   });

@@ -323,6 +323,9 @@ export interface ProviderProfileView {
   minimumNoticeMinutes: number;
   bufferMinutes: number;
   verifiedSessionCount: number;
+  /** Issue #2: the provider's own cancellation count, shown beside the
+   * verified-session line. An honest zero, never hidden. */
+  providerCancellationCount: number;
   isApproved: boolean;
   /** A suspended shop is never returned publicly (`getPublicProviderProfile`
    * refuses it), but its own panel still reads the profile -- that is what
@@ -333,6 +336,9 @@ export interface ProviderProfileView {
   suspensionReason: string | null;
   /** UTC epoch seconds, ascending. */
   slots: number[];
+  /** Issue #3: verified reviews, newest first. Empty stays empty -- never a
+   * placeholder rating. */
+  reviews: ReviewView[];
 }
 
 /** The one place a `ProviderProfileRow` becomes an HTTP response -- shared
@@ -341,6 +347,8 @@ export interface ProviderProfileView {
 export function buildProviderProfileView(
   profile: ProviderProfileRow,
   category: CategoryRow,
+  slots: AvailabilitySlotRow[],
+  reviews: ReviewView[] = [],
   slots: Array<Pick<AvailabilitySlotRow, "startsAt"> | number>,
 ): ProviderProfileView {
   let languages: string[] = [];
@@ -371,6 +379,7 @@ export function buildProviderProfileView(
     minimumNoticeMinutes: profile.minimumNoticeMinutes,
     bufferMinutes: profile.bufferMinutes,
     verifiedSessionCount: profile.verifiedSessionCount,
+    providerCancellationCount: profile.providerCancellationCount,
     isApproved: profile.isApproved,
     isSuspended: profile.suspendedAt !== null,
     suspensionReason: profile.suspensionReason,
@@ -418,6 +427,11 @@ export async function getPublicProviderProfile(
     throw new ProviderNotFoundError();
   }
   const category = await loadCategoryOrThrow(db, profile.categoryId, () => new ProviderNotFoundError());
+  const [slots, reviewRows] = await Promise.all([
+    listOpenFutureSlots(db, profile.id, { now, withinSeconds: PUBLIC_SLOTS_WINDOW_SECONDS }),
+    listReviewsForProvider(db, profile.id),
+  ]);
+  return buildProviderProfileView(profile, category, slots, reviewRows.map(toReviewView));
   const offeredStarts = await listOfferedSlots(db, profile.id, {
     now,
     withinSeconds: PUBLIC_SLOTS_WINDOW_SECONDS,
@@ -444,8 +458,11 @@ export async function getOwnProviderProfile(
     throw new NotAProviderError();
   }
   const category = await loadCategoryOrThrow(db, profile.categoryId, () => new NotAProviderError());
-  const slots = await listFutureSlots(db, profile.id, { now });
-  return buildProviderProfileView(profile, category, slots);
+  const [slots, reviewRows] = await Promise.all([
+    listFutureSlots(db, profile.id, { now }),
+    listReviewsForProvider(db, profile.id),
+  ]);
+  return buildProviderProfileView(profile, category, slots, reviewRows.map(toReviewView));
 }
 
 /** `PUT /me/provider/rules`: validates, saves, and returns the updated own
@@ -822,6 +839,58 @@ export async function listDiscoverProviders(
   });
 
   return cards;
+}
+
+/**
+ * Issue #30: what an empty search offers instead of a dead end. `category`
+ * is the nearest category that actually has approved shops (a category the
+ * search names, the selected category when it has shops, else the
+ * best-populated one); `providers` holds at most three of its approved
+ * shops. `undefined` when there are no approved shops at all -- the empty
+ * state then stays empty, never inventing a suggestion.
+ */
+export interface EmptySearchSuggestions {
+  category: { id: string; name: string; slug: string };
+  providers: ProviderCardView[];
+}
+
+const EMPTY_SEARCH_SUGGESTION_LIMIT = 3;
+
+export async function suggestProvidersForEmptySearch(
+  db: Db,
+  filters: DiscoverFilters = {},
+  categorySlug?: string,
+  now: number = Math.floor(Date.now() / 1000),
+): Promise<EmptySearchSuggestions | undefined> {
+  const categories = await listCategoriesWithProviderCounts(db);
+  const populated = categories.filter((category) => category.providerCount > 0);
+  if (populated.length === 0) {
+    return undefined;
+  }
+
+  const query = filters.query?.trim().toLowerCase();
+  const selected = categorySlug ? categories.find((category) => category.slug === categorySlug) : undefined;
+  const named = query
+    ? populated.find((category) => category.name.toLowerCase().includes(query))
+    : undefined;
+  // "Nearest" is the category the search or the selected tab names when it
+  // has shops, otherwise the category with the most approved shops.
+  const nearest =
+    (selected && selected.providerCount > 0 ? selected : undefined) ??
+    named ??
+    [...populated].sort((a, b) => b.providerCount - a.providerCount || a.name.localeCompare(b.name))[0];
+  if (!nearest) {
+    return undefined;
+  }
+
+  const providers = await listDiscoverProviders(db, nearest.slug, {}, now);
+  if (providers.length === 0) {
+    return undefined;
+  }
+  return {
+    category: { id: nearest.id, name: nearest.name, slug: nearest.slug },
+    providers: providers.slice(0, EMPTY_SEARCH_SUGGESTION_LIMIT),
+  };
 }
 
 export interface CategoryWithProviderCount {

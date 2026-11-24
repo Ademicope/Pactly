@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 
 import { BookingActions } from "./BookingActions";
+import { ReviewForm } from "./ReviewForm";
 import { Countdown } from "./Countdown";
 import { StateLabel } from "./StateLabel";
 import { TryAmount } from "./TryAmount";
@@ -8,7 +9,7 @@ import { bookingProofUrl, buildReleaseMailto } from "../lib/releaseMailto";
 import { stellarExplorerContractUrl, stellarExplorerTransactionUrl, trustlessWorkViewerUrl } from "../lib/stellar";
 import { formatSlotDay, formatSlotTime } from "../lib/time";
 import type { Session } from "../wallet";
-import type { BalanceState, BookingLifecycle, Money, PendingActionKind } from "../api/types";
+import type { BalanceState, BookingLifecycle, Money, PendingActionKind, ProviderReview } from "../api/types";
 
 export interface BookingCardProps {
   /** Which side is looking at this card -- picks the "Resolved" wording
@@ -118,7 +119,7 @@ export function BookingCard({
       : undefined;
 
   return (
-    <article className="booking-card">
+    <article className="booking-card" id={`booking-${id}`}>
       <header className="booking-card__header">
         <div>
           <p className="booking-card__heading">{heading}</p>
@@ -182,11 +183,17 @@ export function BookingCard({
         </a>
       )}
 
-      {contractId && escrowState !== null && (
-        <Link className="booking-card__explorer-link" to={`/proof/${id}`}>
-          Share proof
-        </Link>
-      )}
+      {viewer === "client" && review ? (
+        <div className="booking-card__review">
+          <p className="booking-card__review-heading">Your review</p>
+          <p className="booking-card__review-rating">{review.rating} out of 5</p>
+          {review.comment && <p className="booking-card__review-comment">{review.comment}</p>}
+        </div>
+      ) : null}
+
+      {viewer === "client" && !review && escrowState === "released" && session && onReviewSubmitted ? (
+        <ReviewForm bookingId={id} session={session} onReviewed={onReviewSubmitted} onUnauthorized={onUnauthorized} />
+      ) : null}
 
       <BookingActions
         viewer={viewer}
