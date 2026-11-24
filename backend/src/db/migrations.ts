@@ -48,6 +48,7 @@ const STATEMENTS: readonly string[] = [
     price_amount TEXT NOT NULL,
     deposit_rate_bps INTEGER NOT NULL,
     cancellation_window_hours INTEGER NOT NULL,
+    time_zone TEXT NOT NULL DEFAULT 'UTC',
     buffer_minutes INTEGER NOT NULL DEFAULT 0,
     is_approved INTEGER NOT NULL DEFAULT 0,
     suspended_at INTEGER,
@@ -240,6 +241,9 @@ export function runMigrations(sqlite: Database): void {
   }
   if (!hasColumn(sqlite, "provider_profiles", "location")) {
     sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN location TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!hasColumn(sqlite, "provider_profiles", "time_zone")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN time_zone TEXT NOT NULL DEFAULT 'UTC'`);
   }
   // Admin suspension: nullable, so every pre-existing profile is simply
   // not suspended. Kept (rather than a boolean) because the panel shows

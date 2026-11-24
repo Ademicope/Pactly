@@ -147,6 +147,37 @@ export async function listEarliestFutureSlotsByProvider(
   return result;
 }
 
+/** Raw next-week slot pattern for public-hours summaries. Deliberately does
+ * not apply closed-date or booking overlays: those are one-off exceptions,
+ * not changes to the shop's public weekly pattern. */
+export async function listWeeklyPatternSlotsByProvider(
+  db: Db,
+  providerProfileIds: string[],
+  now: number,
+): Promise<Map<string, number[]>> {
+  const result = new Map<string, number[]>();
+  if (providerProfileIds.length === 0) return result;
+  const rows = await db
+    .select({
+      providerProfileId: availabilitySlots.providerProfileId,
+      startsAt: availabilitySlots.startsAt,
+    })
+    .from(availabilitySlots)
+    .where(and(
+      inArray(availabilitySlots.providerProfileId, providerProfileIds),
+      gt(availabilitySlots.startsAt, now),
+      lte(availabilitySlots.startsAt, now + 7 * 24 * 60 * 60),
+      isNull(availabilitySlots.withdrawnAt),
+    ))
+    .orderBy(asc(availabilitySlots.providerProfileId), asc(availabilitySlots.startsAt));
+  for (const row of rows) {
+    const slots = result.get(row.providerProfileId) ?? [];
+    slots.push(row.startsAt);
+    result.set(row.providerProfileId, slots);
+  }
+  return result;
+}
+
 /** Same as {@link listFutureSlots}, minus any slot that currently carries an
  * active booking (Story 3.4) -- what a *client* should ever be offered to
  * hold. A provider's own view (`getOwnProviderProfile`) still uses

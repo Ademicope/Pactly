@@ -52,6 +52,24 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
   const photoSrc = providerPhotoSrc(provider.id);
   const firstSlot = provider.earliestSlots[0];
   const lockHref = firstSlot ? `/book/${provider.id}?slot=${firstSlot}` : `/providers/${provider.id}`;
+  const weeklyHours = provider.publicHours ?? [];
+  const hasPublicHours = weeklyHours.some((day) => day.hours !== "Closed");
+  const publicHours = (
+    <div className="editorial-card__hours">
+      <strong>Public hours · {provider.timeZone ?? "UTC"}</strong>
+      {hasPublicHours ? (
+        <ul>
+          {weeklyHours.map((day) => (
+            <li key={day.weekday}>
+              <span>{day.weekday}</span> <span>{day.hours}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span>Hours unset</span>
+      )}
+    </div>
+  );
 
   const tile = photoSrc ? (
     <img src={photoSrc} alt="" />
@@ -97,6 +115,7 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
               </span>
             ) : null}
           </div>
+          {publicHours}
         </div>
         <div className="editorial-featured__side">
           <span className="editorial-card__price" style={{ fontSize: "var(--text-18)" }}>
@@ -142,6 +161,7 @@ export function ProviderCard({ provider, variant = "compact", index = 0 }: Provi
           {provider.sessionLengthMinutes} min
         </span>
       </div>
+      {publicHours}
       <DepositPill variant="row" amount={provider.deposit.amount} cancellationWindowHours={provider.cancellationWindowHours} />
       <div className="editorial-card__foot">
         <TryAmount amount={provider.price.amount} className="editorial-card__price" />

@@ -88,6 +88,8 @@ export interface ProviderCard {
   providerCancellationCount: number;
   /** UTC epoch seconds, ascending, at most three. */
   earliestSlots: number[];
+  timeZone?: string;
+  publicHours?: Array<{ weekday: string; hours: string }>;
 }
 
 export interface ProvidersResponse {
