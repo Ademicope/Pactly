@@ -23,6 +23,7 @@ export interface NewProviderProfile {
   depositRateBps: number;
   cancellationWindowHours: number;
   bufferMinutes?: number;
+  minimumNoticeMinutes?: number;
   isApproved?: boolean;
   createdAt: number;
 }
@@ -43,6 +44,7 @@ export async function insertProviderProfile(db: Db, values: NewProviderProfile):
     depositRateBps: values.depositRateBps,
     cancellationWindowHours: values.cancellationWindowHours,
     bufferMinutes: values.bufferMinutes ?? 0,
+    minimumNoticeMinutes: values.minimumNoticeMinutes ?? 0,
     isApproved: values.isApproved ?? false,
     createdAt: values.createdAt,
   });
@@ -183,6 +185,8 @@ export interface ProviderRulesValues {
   priceAmount: string;
   depositRateBps: number;
   cancellationWindowHours: number;
+  /** Issue #36: minimum notice in minutes (0-10080). */
+  minimumNoticeMinutes?: number;
   bufferMinutes: number;
 }
 
@@ -265,14 +269,21 @@ export async function updateProviderProfileText(db: Db, id: string, values: Prov
 }
 
 export async function updateProviderProfileRules(db: Db, id: string, values: ProviderRulesValues): Promise<void> {
+  const updateFields: Record<string, string | number> = {
+    priceAmount: values.priceAmount,
+    depositRateBps: values.depositRateBps,
+    cancellationWindowHours: values.cancellationWindowHours,
+  };
+  // Issue #36: only update minimum notice if provided
+  if (values.minimumNoticeMinutes !== undefined) {
+    updateFields.minimumNoticeMinutes = values.minimumNoticeMinutes;
+  }
+  if (values.bufferMinutes !== undefined) {
+    updateFields.bufferMinutes = values.bufferMinutes;
+  }
   const result = await db
     .update(providerProfiles)
-    .set({
-      priceAmount: values.priceAmount,
-      depositRateBps: values.depositRateBps,
-      cancellationWindowHours: values.cancellationWindowHours,
-      bufferMinutes: values.bufferMinutes,
-    })
+    .set(updateFields)
     .where(eq(providerProfiles.id, id));
   if (result.changes === 0) {
     throw new TypeError(`No provider profile exists with id "${id}"`);
