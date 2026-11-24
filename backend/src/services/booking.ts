@@ -1106,6 +1106,11 @@ export async function openDispute(
   if (lifecycle.action === "disputed") {
     throw new BookingEscrowStateError(`Booking "${bookingId}" already has an open dispute`);
   }
+  if ((reason === "client-no-show" || reason === "provider-no-show") && now <= booking.cancelDeadline) {
+    throw new BookingActionPendingError(
+      `No-show can only be claimed after the cancellation deadline.`,
+    );
+  }
   const result = await adapter.startDispute({ contractId: booking.escrowContractId, signerAddress: walletAddress, reason });
   const suggestedOutcome = computeSuggestedOutcome(reason, booking, now);
   await setPendingDispute(db, bookingId, { txHash: result.txHash, reason, openerWallet: walletAddress, openerRole: role });
