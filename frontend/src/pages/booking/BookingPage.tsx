@@ -126,6 +126,8 @@ export function BookingPage() {
   const [depositQuote, setDepositQuote] = useState<DisplayedQuote | undefined>();
   const [quoteBusy, setQuoteBusy] = useState(false);
   const [quoteError, setQuoteError] = useState<string | undefined>();
+  const flowFatalErrorRef = useRef<HTMLParagraphElement | null>(null);
+  const quoteErrorRef = useRef<HTMLParagraphElement | null>(null);
 
   // Review follow-up: the flow's own "engine" state (which contractId is in
   // play, whether a deploy has actually been submitted) lives in a ref, not
@@ -143,6 +145,13 @@ export function BookingPage() {
 
   const resumeAttemptedRef = useRef(false);
   const formatTryAmount = useFormatTry();
+
+  useEffect(() => {
+    if (flowFatalError) flowFatalErrorRef.current?.focus();
+  }, [flowFatalError]);
+  useEffect(() => {
+    if (quoteError) quoteErrorRef.current?.focus();
+  }, [quoteError]);
 
   const isLocked = phase === "locked";
   const booking = useBooking(hold?.bookingId, session, {
@@ -806,7 +815,7 @@ export function BookingPage() {
               </div>
             )}
             {quoteError && (
-              <p className="banner banner--alert" role="alert" style={{ marginTop: "var(--space-3)" }}>
+              <p ref={quoteErrorRef} className="banner banner--alert" role="alert" tabIndex={-1} style={{ marginTop: "var(--space-3)" }}>
                 {quoteError}
               </p>
             )}
@@ -880,7 +889,7 @@ export function BookingPage() {
                   onChange={(event) => setClientEmail(event.target.value)}
                 />
               </div>
-              <button type="button" className="button-primary" onClick={ensureSessionAndHold} disabled={connecting || holdMutation.isPending}>
+              <button type="button" className="button-primary" onClick={ensureSessionAndHold} disabled={connecting || holdMutation.isPending} aria-label={session ? "Hold this slot" : "Sign in and hold this slot"}>
                 {connecting ? "Signing you in…" : holdMutation.isPending ? "Holding your slot…" : session ? "Hold this slot" : "Sign in and hold this slot"}
               </button>
             </div>
@@ -901,6 +910,7 @@ export function BookingPage() {
                     className="button-primary"
                     onClick={() => void startLocalCurrency()}
                     disabled={localBusy || quoteBusy}
+                    aria-label="Get bank details"
                   >
                     {quoteBusy ? "Refreshing the price…" : localBusy ? "Opening the transfer…" : "Get bank details"}
                   </button>
@@ -918,7 +928,7 @@ export function BookingPage() {
                   <>
                     <p className="booking-step">Step 3 · Lock the deposit</p>
                     {phase === "deploy-failed" ? (
-                      <button type="button" className="button-primary" onClick={tryAgainAfterFailedDeploy}>
+                      <button type="button" className="button-primary" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
                         Try again
                       </button>
                     ) : (
@@ -951,7 +961,7 @@ export function BookingPage() {
           {showLock && !isLocked && (
             <>
               {phase === "deploy-failed" ? (
-                <button type="button" className="button-escrow" onClick={tryAgainAfterFailedDeploy}>
+                <button type="button" className="button-escrow" onClick={tryAgainAfterFailedDeploy} aria-label="Try again">
                   Try again
                 </button>
               ) : (
@@ -973,7 +983,7 @@ export function BookingPage() {
                 </p>
               )}
               {flowFatalError && (
-                <p className="escrow-lane__notice escrow-lane__notice--alert" role="alert">
+                <p ref={flowFatalErrorRef} className="escrow-lane__notice escrow-lane__notice--alert" role="alert" tabIndex={-1}>
                   {flowFatalError}
                 </p>
               )}
