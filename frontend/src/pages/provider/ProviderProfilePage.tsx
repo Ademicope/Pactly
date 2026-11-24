@@ -151,7 +151,11 @@ export function ProviderProfilePage() {
         </div>
 
         <div style={{ marginTop: "var(--space-4)" }}>
-          <DepositPill amount={profile.deposit.amount} cancellationWindowHours={profile.cancellationWindowHours} />
+          <DepositPill
+            amount={profile.deposit.amount}
+            depositRateBps={profile.depositRateBps}
+            cancellationWindowHours={profile.cancellationWindowHours}
+          />
         </div>
 
         <div style={{ marginTop: "var(--space-6)" }}>
