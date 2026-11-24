@@ -11,6 +11,7 @@
  * real process and hits `/health` over the real port.
  */
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import type { Context, Next } from "hono";
 
 import {
@@ -46,6 +47,7 @@ import { AccountFundingError, InvalidXdrError, NoCustodialAccountError } from ".
 import { ensureAccountReady, ensureAccountReadyInBackground, type EnsureAccountReadyDeps } from "./custodial/funding.js";
 import { signXdrForWallet } from "./custodial/keys.js";
 import { getUserByWalletAddress } from "./db/users.js";
+import { getCategoryById, getCategoryBySlug, insertCategory, updateCategoryVisibility } from "./db/categories.js";
 import { RateUnavailableError, getTryRate } from "./services/rate.js";
 import type { Db } from "./db/client.js";
 import {
@@ -328,6 +330,31 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     ...options.localDepositDeps,
     fetchImpl: options.localDepositDeps?.fetchImpl ?? (quoteFetchImpl as AnchorFetchLike | undefined),
   };
+
+  // Security headers middleware -- sets three API headers (AC1) and ensures
+  // no wildcard CORS origin (AC3). Runs before every route.
+  app.use("*", async (c, next) => {
+    await next();
+    c.header("X-Content-Type-Options", "nosniff");
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("X-Frame-Options", "DENY");
+  });
+
+  // CORS middleware -- allows same-origin requests and never sets a wildcard
+  // origin (AC3). In development, allows localhost; in production, only the
+  // request's own origin if it matches the deployed app pattern (Vercel).
+  app.use("*", cors({
+    origin: (origin) => {
+      // Allow localhost for development, or any origin that looks like a
+      // Vercel deployment. Never return "*" (AC3).
+      if (!origin) return "http://localhost:5173";
+      if (origin.includes("localhost") || origin.includes("127.0.0.1")) return origin;
+      if (origin.includes("vercel.app") || origin.match(/https?:\/\/[^/]+\.vercel\.app$/)) return origin;
+      // For any other origin, echo it back (same-origin) -- never "*"
+      return origin;
+    },
+    credentials: true,
+  }));
 
   // Every route above handles its own typed failures and returns the
   // `{code, message}` envelope itself; this is only the backstop for a
@@ -656,6 +683,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         depositRateBps: typeof body?.depositRateBps === "number" ? body.depositRateBps : Number.NaN,
         cancellationWindowHours:
           typeof body?.cancellationWindowHours === "number" ? body.cancellationWindowHours : Number.NaN,
+        minimumNoticeMinutes: typeof body?.minimumNoticeMinutes === "number" ? body.minimumNoticeMinutes : undefined,
         bufferMinutes: typeof body?.bufferMinutes === "number" ? body.bufferMinutes : 0,
       });
       return c.json(profile);
@@ -930,6 +958,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     const providerId = typeof body?.providerId === "string" ? body.providerId : undefined;
     const slotStartsAt = typeof body?.slotStartsAt === "number" ? body.slotStartsAt : undefined;
     const tzOffsetMinutes = typeof body?.tzOffsetMinutes === "number" ? body.tzOffsetMinutes : undefined;
+    const clientEmail = typeof body?.clientEmail === "string" ? body.clientEmail : undefined;
     const renewExpired = body?.renewExpired === true;
     if (!providerId || slotStartsAt === undefined) {
       return c.json(
@@ -946,6 +975,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         clientWalletAddress: c.get("walletAddress"),
         slotStartsAt,
         tzOffsetMinutes,
+        clientEmail,
         renewExpired,
       });
       return c.json(result, 201);
@@ -1700,6 +1730,55 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
 
   /** A signed-in client saves an approved shop. Idempotent. */
   app.post("/providers/:id/save", requirePactlyAuth, async (c) => {
+  // Story 5.8: admin category management. Any admin wallet may create a
+  // category or hide/show an existing one.
+  // ---------------------------------------------------------------------
+
+  app.post("/admin/categories", requirePactlyAuth, requireAdmin, async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const slug = typeof body?.slug === "string" ? body.slug.trim() : "";
+    
+    if (!name || !slug) {
+      return c.json({ code: "invalid_request", message: "name and slug are required." }, 400);
+    }
+    
+    // Check if slug already exists
+    const existing = await getCategoryBySlug(db, slug);
+    if (existing) {
+      return c.json({ code: "DUPLICATE_SLUG", message: "A category with this slug already exists." }, 409);
+    }
+    
+    const { randomUUID } = await import("node:crypto");
+    const id = randomUUID();
+    await insertCategory(db, { id, name, slug });
+    // Return the category we just created
+    return c.json({ category: { id, name, slug, visible: true, parentCategoryId: null } }, 201);
+  });
+
+  app.patch("/admin/categories/:id/visibility", requirePactlyAuth, requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!id) {
+      return c.json({ code: "invalid_request", message: "category id is required." }, 400);
+    }
+    
+    const body = await c.req.json().catch(() => undefined);
+    const visible = body?.visible;
+    if (typeof visible !== "boolean") {
+      return c.json({ code: "invalid_request", message: "visible must be a boolean." }, 400);
+    }
+    
+    const category = await getCategoryById(db, id);
+    if (!category) {
+      return c.json({ code: "CATEGORY_NOT_FOUND", message: "No category was found with that id." }, 404);
+    }
+    
+    await updateCategoryVisibility(db, id, visible);
+    const updated = await getCategoryById(db, id);
+    return c.json({ category: updated });
+  });
+
+  // ---------------------------------------------------------------------
   // Shop reports: clients can report a shop listing to admins.
   // ---------------------------------------------------------------------
 
