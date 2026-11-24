@@ -682,6 +682,24 @@ export const escrowDisputeOpenings = sqliteTable("escrow_dispute_openings", {
 });
 
 /**
+ * Story: saved shops (#73) - a client's personal list of shops they want to
+ * book again. Only signed-in clients can save shops; only approved shops can
+ * be saved. Saving is idempotent (saving twice is a no-op). A shop with a
+ * booking is not saved automatically. The unique constraint on (clientWallet,
+ * providerProfileId) prevents duplicates.
+ */
+export const savedShops = sqliteTable(
+  "saved_shops",
+  {
+    id: text("id").primaryKey(),
+    clientWalletAddress: text("client_wallet_address").notNull(),
+    providerProfileId: text("provider_profile_id")
+      .notNull()
+      .references(() => providerProfiles.id),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [unique().on(table.clientWalletAddress, table.providerProfileId)],
+);
  * Shop reports: a signed-in client can report a shop listing to admins.
  * One report per client per shop per day. Does not change the shop's status.
  */

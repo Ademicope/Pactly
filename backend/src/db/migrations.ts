@@ -159,6 +159,13 @@ const STATEMENTS: readonly string[] = [
     evidence_hash TEXT,
     opened_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS saved_shops (
+    id TEXT PRIMARY KEY,
+    client_wallet_address TEXT NOT NULL,
+    provider_profile_id TEXT NOT NULL REFERENCES provider_profiles(id),
+    created_at INTEGER NOT NULL,
+    UNIQUE (client_wallet_address, provider_profile_id)
+  )`,
   // Passkey pivot: users with an embedded custodial account, their passkey
   // credentials, and the consume-once WebAuthn challenges.
   `CREATE TABLE IF NOT EXISTS users (
