@@ -2,6 +2,7 @@
  * for provider/category data. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { apiGet, apiPost, apiPut, ApiError, apiDelete } from "./client";
 import { apiDelete, apiGet, apiPost, apiPut, ApiError } from "./client";
 import type {
   ActionResponse,
@@ -17,6 +18,7 @@ import type {
   HoldSlotResponse,
   LockResponse,
   MyBookingsResponse,
+  MyEventsResponse,
   OpenDisputeResponse,
   ProviderBookingsResponse,
   ProviderProfile,
@@ -38,12 +40,14 @@ import type {
   ProviderApplicationOutcome,
   ProviderReview,
   RateResponse,
-  CashOutBalance,
-  CashOutView,
-  CashOutsResponse,
-  StartCashOutResponse,
+  SaveShopResponse,
+  UnsaveShopResponse,
+  IsShopSavedResponse,
+  SavedShopsResponse,
   ShopReportSubmitResponse,
   ShopReportsListResponse,
+  ClosedDatesResponse,
+  ProviderProfileEditInput,
 } from "./types";
 import { FALLBACK_TRY_PER_USDC } from "../lib/money";
 import type { Session } from "../wallet";
@@ -369,6 +373,17 @@ export function useMyBookings(session: Session | undefined) {
   });
 }
 
+/** Issue #31: the signed-in wallet's own in-app event list (lock, release,
+ * dispute, resolve) across every booking they are a party to, newest first. */
+export function useMyEvents(session: Session | undefined) {
+  return useQuery({
+    queryKey: ["me", "events", session?.walletAddress],
+    queryFn: () => apiGet<MyEventsResponse>("/me/events", session?.token),
+    enabled: Boolean(session),
+    retry: false,
+  });
+}
+
 /** `GET /me/provider/bookings` -- the provider panel's "Bookings" view. */
 export function useProviderBookings(session: Session | undefined) {
   return useQuery({
@@ -407,8 +422,14 @@ export function releaseDeposit(bookingId: string, session: Session): Promise<Rel
  * resolution" -- policy guidance stated first, chain state kept separate).
  * Building this XDR has no on-chain effect by itself; nothing moves unless
  * the caller goes on to sign and submit it. */
-export function openDispute(bookingId: string, reason: DisputeReason, session: Session): Promise<OpenDisputeResponse> {
-  return apiPost<OpenDisputeResponse>(`/bookings/${bookingId}/dispute`, { reason }, session.token);
+export function openDispute(
+  bookingId: string,
+  reason: DisputeReason,
+  session: Session,
+  note = "",
+  evidenceHash = "",
+): Promise<OpenDisputeResponse> {
+  return apiPost<OpenDisputeResponse>(`/bookings/${bookingId}/dispute`, { reason, note, evidenceHash }, session.token);
 }
 
 /** Pactly's own dispute-resolver signature -- only ever callable by the
@@ -452,14 +473,8 @@ export function markBalancePaidCash(bookingId: string, session: Session): Promis
   return apiPost<{ ok: true }>(`/bookings/${bookingId}/balance/mark-cash`, {}, session.token);
 }
 
-/** Issue #3: the booking's own client submits one review after release. */
-export function createBookingReview(
-  bookingId: string,
-  rating: number,
-  comment: string,
-  session: Session,
-): Promise<{ review: ProviderReview }> {
-  return apiPost<{ review: ProviderReview }>(`/bookings/${bookingId}/review`, { rating, comment }, session.token);
+export function markBookingArrived(bookingId: string, session: Session): Promise<{ ok: true }> {
+  return apiPost<{ ok: true }>(`/bookings/${bookingId}/arrived`, {}, session.token);
 }
 
 // ---------------------------------------------------------------------------
@@ -586,19 +601,17 @@ export function useSubmitProviderApplication(session: Session | undefined) {
   });
 }
 
-/** Live deposit for the apply form -- the number on screen is whatever
- * this returns. Disabled until both price and rate look parseable; a
- * 400 from the server is a failed preview (caller blocks submit). */
-export function useApplicationDepositPreview(
-  session: Session | undefined,
-  input: DepositPreviewInput | undefined,
-) {
-  return useQuery({
-    queryKey: ["me", "provider", "application", "deposit-preview", session?.walletAddress, input?.priceAmount, input?.depositRateBps],
-    queryFn: () =>
-      apiPost<DepositPreviewResponse>("/me/provider/application/deposit-preview", input, session?.token),
-    enabled: Boolean(session && input?.priceAmount && Number.isInteger(input.depositRateBps)),
-    retry: false,
+export function useUpdateProviderApplication(session: Session | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ProviderApplicationInput) =>
+      apiPut<OwnProviderApplicationResponse>("/me/provider/application", input, session?.token),
+    onSuccess: (response) => {
+      queryClient.setQueryData(OWN_APPLICATION_KEY(session?.walletAddress), response.application);
+      // The same fields live on the unapproved profile; its cached view must
+      // reflect the correction (location included) without re-approving it.
+      void queryClient.invalidateQueries({ queryKey: OWN_PROVIDER_KEY(session?.walletAddress) });
+    },
   });
 }
 
@@ -658,6 +671,37 @@ export function useTryRate(): TryRate {
 }
 
 // ---------------------------------------------------------------------------
+// Saved shops: a client's personal list of shops they want to book again.
+// ---------------------------------------------------------------------------
+
+/** Save a shop for the signed-in client. */
+export async function saveShop(providerProfileId: string, token: string): Promise<SaveShopResponse> {
+  return apiPost<SaveShopResponse>(`/providers/${providerProfileId}/save`, {}, token);
+}
+
+/** Unsave a shop for the signed-in client. */
+export async function unsaveShop(providerProfileId: string, token: string): Promise<UnsaveShopResponse> {
+  return apiDelete<UnsaveShopResponse>(`/providers/${providerProfileId}/save`, token);
+}
+
+/** Check if a shop is saved by the signed-in client. */
+export function useIsShopSaved(providerProfileId: string | undefined, session: Session | undefined) {
+  return useQuery({
+    queryKey: ["saved-shops", "check", providerProfileId, session?.walletAddress],
+    queryFn: () => apiGet<IsShopSavedResponse>(`/providers/${providerProfileId}/saved`, session?.token),
+    enabled: Boolean(providerProfileId && session),
+    retry: false,
+  });
+}
+
+/** List all saved shops for the signed-in client. */
+export function useSavedShops(session: Session | undefined) {
+  return useQuery({
+    queryKey: ["saved-shops", session?.walletAddress],
+    queryFn: () => apiGet<SavedShopsResponse>("/me/saved-shops", session?.token),
+    enabled: Boolean(session),
+    retry: false,
+  });
 // Shop reports: clients report a shop to admins.
 // ---------------------------------------------------------------------------
 

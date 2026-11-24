@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 
+import { saveShop, unsaveShop, useIsShopSaved, usePublicProviderProfile } from "../../api/hooks";
 import { submitShopReport, usePublicProviderProfile } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import { DepositPill } from "../../components/DepositPill";
@@ -28,6 +29,13 @@ export function ProviderProfilePage() {
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportNotice, setReportNotice] = useState<{ text: string; isError: boolean } | undefined>();
 
+  const [session] = useState<Session | undefined>(() => getSession());
+  const { data: savedData, refetch: refetchSaved } = useIsShopSaved(id, session);
+  const [savingState, setSavingState] = useState<"idle" | "saving" | "unsaving">("idle");
+  const [saveNotice, setSaveNotice] = useState<string | undefined>();
+
+  const isSaved = savedData?.isSaved ?? false;
+
   // `?slot=<epochSeconds>` pre-selects that slot when it matches an open
   // one; any other value (unknown, stale, malformed) is silently ignored
   // (the spec's own "Slot pre-selection" row).
@@ -46,6 +54,34 @@ export function ProviderProfilePage() {
     setSearchParams(next, { replace: true });
   }
 
+  async function handleSaveToggle(): Promise<void> {
+    if (!session || !id) return;
+
+    setSavingState(isSaved ? "unsaving" : "saving");
+    setSaveNotice(undefined);
+
+    try {
+      if (isSaved) {
+        await unsaveShop(id, session.token);
+        setSaveNotice("Removed from saved shops");
+      } else {
+        await saveShop(id, session.token);
+        setSaveNotice("Saved!");
+      }
+      await refetchSaved();
+      setTimeout(() => setSaveNotice(undefined), 2000);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.code === "SHOP_NOT_APPROVED") {
+          setSaveNotice("This shop is not taking bookings");
+        } else {
+          setSaveNotice("Something went wrong");
+        }
+      } else {
+        setSaveNotice("Connection dropped. Try again.");
+      }
+    } finally {
+      setSavingState("idle");
   async function handleReportSubmit(): Promise<void> {
     if (!session || !id) return;
     
@@ -107,6 +143,7 @@ export function ProviderProfilePage() {
 
   const dayGroups = groupSlotsByDay(profile.slots);
   
+  const canSave = session && profile.isApproved;
   const canReport = session && profile.isApproved;
 
   return (
@@ -122,6 +159,20 @@ export function ProviderProfilePage() {
         photoSrc={providerPhotoSrc(profile.id)}
       />
 
+      {canSave && (
+        <div style={{ marginTop: "var(--space-4)", display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={handleSaveToggle}
+            disabled={savingState !== "idle"}
+            style={{ fontSize: "var(--text-14)" }}
+          >
+            {savingState === "saving" && "Saving..."}
+            {savingState === "unsaving" && "Removing..."}
+            {savingState === "idle" && (isSaved ? "★ Saved" : "☆ Save shop")}
+          </button>
+          {saveNotice && <span style={{ fontSize: "var(--text-14)", color: "var(--color-text-secondary)" }}>{saveNotice}</span>}
       {canReport && (
         <div style={{ marginTop: "var(--space-4)" }}>
           <button

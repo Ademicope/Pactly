@@ -8,6 +8,7 @@ import { BookingsPage } from "./pages/panel/BookingsPage";
 import { CashOutPage } from "./pages/panel/CashOutPage";
 import { BookingPage } from "./pages/booking/BookingPage";
 import { MyBookingsPage } from "./pages/my-bookings/MyBookingsPage";
+import { EventsPage } from "./pages/me-events/EventsPage";
 import { ResolutionsPage } from "./pages/admin/ResolutionsPage";
 import { ApplicationsPage } from "./pages/admin/ApplicationsPage";
 import { ApplyPage } from "./pages/apply/ApplyPage";
@@ -25,6 +26,7 @@ function TopBar() {
       <nav className="top-bar__nav">
         <Link to="/discover">Discover</Link>
         <Link to="/me/bookings">My bookings</Link>
+        <Link to="/me/events">My events</Link>
         <Link to="/panel/bookings">Provider panel</Link>
         <Link to="/providers/apply" className="button-ghost">
           List your shop
@@ -45,6 +47,7 @@ export function App() {
         <Route path="/providers/:id" element={<ProviderProfilePage />} />
         <Route path="/book/:providerId" element={<BookingPage />} />
         <Route path="/me/bookings" element={<MyBookingsPage />} />
+        <Route path="/me/events" element={<EventsPage />} />
         <Route path="/panel/availability" element={<AvailabilityPage />} />
         <Route path="/panel/bookings" element={<BookingsPage />} />
         <Route path="/panel/cash-out" element={<CashOutPage />} />

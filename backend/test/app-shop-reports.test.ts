@@ -6,447 +6,288 @@
  * The shop and public cannot see reports. A report does not change the
  * shop's status. Same client can report a shop once per day.
  */
-import { describe, expect, test } from "bun:test";
-import { testDb, testKp, testKp2, testKp3, testWallet, testWallet2, testWallet3 } from "./test-helpers.js";
+import "./testConfigEnv.js";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { Keypair } from "@stellar/stellar-sdk";
+
 import { createApp } from "../src/app.js";
 import { issuePactlyJwt } from "../src/auth/challenge.js";
-import { insertProviderProfile } from "../src/db/providerProfiles.js";
-import { insertCategory } from "../src/db/categories.js";
+import {
+  closeDatabase,
+  openTestDatabase,
+  seedCategory,
+  seedProviderProfile,
+  type SeedProviderProfileOptions,
+} from "./helpers.js";
+import type { OpenDatabaseResult } from "../src/db/client.js";
 
-describe("Shop reports", () => {
-  test("Submit report successfully", async () => {
-    const db = testDb();
-    const app = createApp(db);
+/** The admin wallet `testConfigEnv.ts` puts in `PACTLY_ADMIN_WALLETS`. */
+const TEST_ADMIN_WALLET = "GADMIN1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
 
-    // Set up: create an approved provider
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const providerId = await insertProviderProfile(db, {
-      walletAddress: testWallet,
-      displayName: "Test Shop",
-      title: "Test Service",
-      categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
-      isApproved: true,
-      verifiedSessionCount: 0,
-    });
+async function seedApprovedProvider(
+  result: OpenDatabaseResult,
+  overrides: SeedProviderProfileOptions = {},
+): Promise<string> {
+  const categoryId = await seedCategory(result);
+  return seedProviderProfile(result, { categoryId, isApproved: true, ...overrides });
+}
 
-    // Client submits a report
-    const clientToken = await issuePactlyJwt(testWallet2);
-    const reportRes = await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "This shop listing looks incorrect" }),
-    });
+async function report(
+  app: ReturnType<typeof createApp>,
+  providerProfileId: string,
+  token: string,
+  reason: string,
+): Promise<Response> {
+  return app.request(`/providers/${providerProfileId}/report`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ reason }),
+  });
+}
 
-    expect(reportRes.status).toBe(201);
-    const reportData = await reportRes.json();
-    expect(reportData).toHaveProperty("reportId");
-    expect(typeof reportData.reportId).toBe("string");
+test("Submit report successfully, and an admin can list it", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const providerId = await seedApprovedProvider(result, { displayName: "Test Shop", title: "Test Service" });
+    const clientWallet = Keypair.random().publicKey();
+    const clientToken = await issuePactlyJwt(clientWallet);
 
-    // Admin can list reports
-    const adminToken = await issuePactlyJwt(testWallet3);
+    const reportRes = await report(app, providerId, clientToken, "This shop listing looks incorrect");
+    assert.equal(reportRes.status, 201);
+    const reportData = (await reportRes.json()) as { reportId: string };
+    assert.equal(typeof reportData.reportId, "string");
+
+    const adminToken = await issuePactlyJwt(TEST_ADMIN_WALLET);
     const listRes = await app.request("/admin/shop-reports", {
-      method: "GET",
-      headers: { Authorization: `Bearer ${adminToken}` },
+      headers: { authorization: `Bearer ${adminToken}` },
     });
+    assert.equal(listRes.status, 200);
+    const listData = (await listRes.json()) as {
+      reports: Array<{
+        reason: string;
+        reportedByWallet: string;
+        provider: { id: string; displayName: string; isApproved: boolean };
+      }>;
+    };
+    assert.ok(Array.isArray(listData.reports));
+    assert.equal(listData.reports.length, 1);
+    assert.equal(listData.reports[0]?.reason, "This shop listing looks incorrect");
+    assert.equal(listData.reports[0]?.reportedByWallet, clientWallet);
+    assert.equal(listData.reports[0]?.provider.id, providerId);
+    assert.equal(listData.reports[0]?.provider.displayName, "Test Shop");
+    assert.equal(listData.reports[0]?.provider.isApproved, true);
+  } finally {
+    closeDatabase(result);
+  }
+});
 
-    expect(listRes.status).toBe(200);
-    const listData = await listRes.json();
-    expect(listData.reports).toBeArray();
-    expect(listData.reports.length).toBe(1);
-    expect(listData.reports[0].reason).toBe("This shop listing looks incorrect");
-    expect(listData.reports[0].reportedByWallet).toBe(testWallet2);
-    expect(listData.reports[0].provider.id).toBe(providerId);
-    expect(listData.reports[0].provider.displayName).toBe("Test Shop");
-    expect(listData.reports[0].provider.isApproved).toBe(true);
-  });
+test("Empty or whitespace-only reason is rejected", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const providerId = await seedApprovedProvider(result);
+    const clientToken = await issuePactlyJwt(Keypair.random().publicKey());
 
-  test("Empty reason is rejected", async () => {
-    const db = testDb();
-    const app = createApp(db);
+    for (const reason of ["", "   "]) {
+      const res = await report(app, providerId, clientToken, reason);
+      assert.equal(res.status, 400);
+      const data = (await res.json()) as { code: string };
+      assert.equal(data.code, "INVALID_REASON");
+    }
+  } finally {
+    closeDatabase(result);
+  }
+});
 
-    // Set up: create an approved provider
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const providerId = await insertProviderProfile(db, {
-      walletAddress: testWallet,
-      displayName: "Test Shop",
-      title: "Test Service",
+test("Reason over 500 chars is rejected", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const providerId = await seedApprovedProvider(result);
+    const clientToken = await issuePactlyJwt(Keypair.random().publicKey());
+
+    const res = await report(app, providerId, clientToken, "a".repeat(501));
+    assert.equal(res.status, 400);
+    const data = (await res.json()) as { code: string };
+    assert.equal(data.code, "INVALID_REASON");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Report against missing shop returns 404", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const clientToken = await issuePactlyJwt(Keypair.random().publicKey());
+
+    const res = await report(app, "nonexistent-shop-id", clientToken, "This shop looks suspicious");
+    assert.equal(res.status, 404);
+    const data = (await res.json()) as { code: string };
+    assert.equal(data.code, "SHOP_NOT_FOUND");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Report against unapproved shop returns 404", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const categoryId = await seedCategory(result);
+    const providerId = await seedProviderProfile(result, {
       categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
-      isApproved: true,
-      verifiedSessionCount: 0,
-    });
-
-    const clientToken = await issuePactlyJwt(testWallet2);
-    
-    // Empty string
-    const emptyRes = await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "" }),
-    });
-
-    expect(emptyRes.status).toBe(400);
-    const emptyData = await emptyRes.json();
-    expect(emptyData.code).toBe("INVALID_REASON");
-
-    // Whitespace only
-    const whitespaceRes = await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "   " }),
-    });
-
-    expect(whitespaceRes.status).toBe(400);
-    const whitespaceData = await whitespaceRes.json();
-    expect(whitespaceData.code).toBe("INVALID_REASON");
-  });
-
-  test("Reason over 500 chars is rejected", async () => {
-    const db = testDb();
-    const app = createApp(db);
-
-    // Set up: create an approved provider
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const providerId = await insertProviderProfile(db, {
-      walletAddress: testWallet,
-      displayName: "Test Shop",
-      title: "Test Service",
-      categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
-      isApproved: true,
-      verifiedSessionCount: 0,
-    });
-
-    const clientToken = await issuePactlyJwt(testWallet2);
-    const longReason = "a".repeat(501);
-
-    const res = await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: longReason }),
-    });
-
-    expect(res.status).toBe(400);
-    const data = await res.json();
-    expect(data.code).toBe("INVALID_REASON");
-  });
-
-  test("Report against missing shop returns 404", async () => {
-    const db = testDb();
-    const app = createApp(db);
-
-    const clientToken = await issuePactlyJwt(testWallet2);
-
-    const res = await app.request("/providers/nonexistent-shop-id/report", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "This shop looks suspicious" }),
-    });
-
-    expect(res.status).toBe(404);
-    const data = await res.json();
-    expect(data.code).toBe("SHOP_NOT_FOUND");
-  });
-
-  test("Report against unapproved shop returns 404", async () => {
-    const db = testDb();
-    const app = createApp(db);
-
-    // Set up: create an unapproved provider
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const providerId = await insertProviderProfile(db, {
-      walletAddress: testWallet,
       displayName: "Unapproved Shop",
-      title: "Test Service",
+      isApproved: false,
+    });
+    const clientToken = await issuePactlyJwt(Keypair.random().publicKey());
+
+    const res = await report(app, providerId, clientToken, "This shop looks suspicious");
+    assert.equal(res.status, 404);
+    const data = (await res.json()) as { code: string };
+    assert.equal(data.code, "SHOP_NOT_FOUND");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Same client cannot report same shop within 24 hours (rate limit)", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const providerId = await seedApprovedProvider(result);
+    const clientToken = await issuePactlyJwt(Keypair.random().publicKey());
+
+    const firstRes = await report(app, providerId, clientToken, "First report");
+    assert.equal(firstRes.status, 201);
+
+    const secondRes = await report(app, providerId, clientToken, "Second report");
+    assert.equal(secondRes.status, 429);
+    const data = (await secondRes.json()) as { code: string };
+    assert.equal(data.code, "RATE_LIMIT");
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("Admin can list reports, newest first", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const categoryId = await seedCategory(result);
+    const provider1Id = await seedProviderProfile(result, {
       categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
-      isApproved: false, // Not approved
-      verifiedSessionCount: 0,
-    });
-
-    const clientToken = await issuePactlyJwt(testWallet2);
-
-    const res = await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "This shop looks suspicious" }),
-    });
-
-    expect(res.status).toBe(404);
-    const data = await res.json();
-    expect(data.code).toBe("SHOP_NOT_FOUND");
-  });
-
-  test("Same client cannot report same shop within 24 hours (rate limit)", async () => {
-    const db = testDb();
-    const app = createApp(db);
-
-    // Set up: create an approved provider
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const providerId = await insertProviderProfile(db, {
-      walletAddress: testWallet,
-      displayName: "Test Shop",
-      title: "Test Service",
-      categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
-      isApproved: true,
-      verifiedSessionCount: 0,
-    });
-
-    const clientToken = await issuePactlyJwt(testWallet2);
-
-    // First report - should succeed
-    const firstRes = await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "First report" }),
-    });
-
-    expect(firstRes.status).toBe(201);
-
-    // Second report immediately - should be rate limited
-    const secondRes = await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "Second report" }),
-    });
-
-    expect(secondRes.status).toBe(429);
-    const data = await secondRes.json();
-    expect(data.code).toBe("RATE_LIMIT");
-  });
-
-  test("Admin can list reports, newest first", async () => {
-    const db = testDb();
-    const app = createApp(db);
-
-    // Set up: create approved providers
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const provider1Id = await insertProviderProfile(db, {
-      walletAddress: testWallet,
       displayName: "Shop One",
-      title: "Test Service",
-      categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
       isApproved: true,
-      verifiedSessionCount: 0,
     });
-
-    const provider2Id = await insertProviderProfile(db, {
-      walletAddress: testWallet2,
+    const provider2Id = await seedProviderProfile(result, {
+      categoryId,
       displayName: "Shop Two",
-      title: "Another Service",
-      categoryId,
-      location: "Another City",
-      serviceDescription: "Another description",
-      sessionFormat: "video",
-      sessionLengthMinutes: 30,
-      priceAmount: "5000000",
-      depositRateBps: 500,
-      cancellationWindowHours: 12,
       isApproved: true,
-      verifiedSessionCount: 5,
     });
+    const clientToken = await issuePactlyJwt(Keypair.random().publicKey());
 
-    // Client reports both shops
-    const clientToken = await issuePactlyJwt(testWallet3);
+    const firstRes = await report(app, provider1Id, clientToken, "First report");
+    assert.equal(firstRes.status, 201);
+    // Timestamps are whole seconds, so two reports in the same second would
+    // tie. Move the older report back a minute to make "newest first" a real
+    // assertion rather than a row-order accident.
+    result.sqlite
+      .prepare("UPDATE shop_reports SET created_at = created_at - 60 WHERE provider_profile_id = ?")
+      .run(provider1Id);
 
-    await app.request(`/providers/${provider1Id}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "First report" }),
-    });
+    const secondRes = await report(app, provider2Id, clientToken, "Second report");
+    assert.equal(secondRes.status, 201);
 
-    // Wait a tiny bit to ensure different timestamps
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    await app.request(`/providers/${provider2Id}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "Second report" }),
-    });
-
-    // Admin lists reports
-    const adminToken = await issuePactlyJwt(testWallet3);
+    const adminToken = await issuePactlyJwt(TEST_ADMIN_WALLET);
     const listRes = await app.request("/admin/shop-reports", {
-      method: "GET",
-      headers: { Authorization: `Bearer ${adminToken}` },
+      headers: { authorization: `Bearer ${adminToken}` },
     });
+    assert.equal(listRes.status, 200);
+    const listData = (await listRes.json()) as {
+      reports: Array<{ reason: string; provider: { displayName: string } }>;
+    };
+    assert.equal(listData.reports.length, 2);
+    assert.equal(listData.reports[0]?.reason, "Second report");
+    assert.equal(listData.reports[0]?.provider.displayName, "Shop Two");
+    assert.equal(listData.reports[1]?.reason, "First report");
+    assert.equal(listData.reports[1]?.provider.displayName, "Shop One");
+  } finally {
+    closeDatabase(result);
+  }
+});
 
-    expect(listRes.status).toBe(200);
-    const listData = await listRes.json();
-    expect(listData.reports).toBeArray();
-    expect(listData.reports.length).toBe(2);
+test("Shop status unchanged after report", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const providerId = await seedApprovedProvider(result, { displayName: "Test Shop" });
 
-    // Newest first
-    expect(listData.reports[0].reason).toBe("Second report");
-    expect(listData.reports[0].provider.displayName).toBe("Shop Two");
-    expect(listData.reports[1].reason).toBe("First report");
-    expect(listData.reports[1].provider.displayName).toBe("Shop One");
-  });
-
-  test("Shop status unchanged after report", async () => {
-    const db = testDb();
-    const app = createApp(db);
-
-    // Set up: create an approved provider
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const providerId = await insertProviderProfile(db, {
-      walletAddress: testWallet,
-      displayName: "Test Shop",
-      title: "Test Service",
-      categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
-      isApproved: true,
-      verifiedSessionCount: 0,
-    });
-
-    // Get shop before report
     const beforeRes = await app.request(`/providers/${providerId}`);
-    expect(beforeRes.status).toBe(200);
-    const beforeData = await beforeRes.json();
-    expect(beforeData.isApproved).toBe(true);
+    assert.equal(beforeRes.status, 200);
+    const beforeData = (await beforeRes.json()) as {
+      isApproved: boolean;
+      displayName: string;
+      verifiedSessionCount: number;
+    };
+    assert.equal(beforeData.isApproved, true);
 
-    // Client submits a report
-    const clientToken = await issuePactlyJwt(testWallet2);
-    await app.request(`/providers/${providerId}/report`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${clientToken}`,
-      },
-      body: JSON.stringify({ reason: "Suspicious listing" }),
-    });
+    const clientToken = await issuePactlyJwt(Keypair.random().publicKey());
+    const reportRes = await report(app, providerId, clientToken, "Suspicious listing");
+    assert.equal(reportRes.status, 201);
 
-    // Get shop after report - should be unchanged
     const afterRes = await app.request(`/providers/${providerId}`);
-    expect(afterRes.status).toBe(200);
-    const afterData = await afterRes.json();
-    expect(afterData.isApproved).toBe(true);
-    expect(afterData.displayName).toBe(beforeData.displayName);
-    expect(afterData.verifiedSessionCount).toBe(beforeData.verifiedSessionCount);
-  });
+    assert.equal(afterRes.status, 200);
+    const afterData = (await afterRes.json()) as {
+      isApproved: boolean;
+      displayName: string;
+      verifiedSessionCount: number;
+    };
+    assert.equal(afterData.isApproved, true);
+    assert.equal(afterData.displayName, beforeData.displayName);
+    assert.equal(afterData.verifiedSessionCount, beforeData.verifiedSessionCount);
+  } finally {
+    closeDatabase(result);
+  }
+});
 
-  test("Non-admin cannot access admin endpoint", async () => {
-    const db = testDb();
-    const app = createApp(db);
+test("Non-admin cannot access admin endpoint", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const userToken = await issuePactlyJwt(Keypair.random().publicKey());
 
-    // Regular user (non-admin) tries to list reports
-    const userToken = await issuePactlyJwt(testWallet2);
     const res = await app.request("/admin/shop-reports", {
-      method: "GET",
-      headers: { Authorization: `Bearer ${userToken}` },
+      headers: { authorization: `Bearer ${userToken}` },
     });
+    assert.equal(res.status, 404);
+    const data = (await res.json()) as { code: string };
+    assert.equal(data.code, "NOT_ADMIN");
+  } finally {
+    closeDatabase(result);
+  }
+});
 
-    expect(res.status).toBe(404);
-    const data = await res.json();
-    expect(data.code).toBe("NOT_ADMIN");
-  });
+test("Unauthenticated user cannot submit report", async () => {
+  const result = openTestDatabase();
+  try {
+    const app = createApp(result.db);
+    const providerId = await seedApprovedProvider(result);
 
-  test("Unauthenticated user cannot submit report", async () => {
-    const db = testDb();
-    const app = createApp(db);
-
-    // Set up: create an approved provider
-    const categoryId = await insertCategory(db, { name: "Test Category", slug: "test-category" });
-    const providerId = await insertProviderProfile(db, {
-      walletAddress: testWallet,
-      displayName: "Test Shop",
-      title: "Test Service",
-      categoryId,
-      location: "Test City",
-      serviceDescription: "Test description",
-      sessionFormat: "in_person",
-      sessionLengthMinutes: 60,
-      priceAmount: "10000000",
-      depositRateBps: 1000,
-      cancellationWindowHours: 24,
-      isApproved: true,
-      verifiedSessionCount: 0,
-    });
-
-    // No auth header
     const res = await app.request(`/providers/${providerId}/report`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ reason: "This shop looks incorrect" }),
     });
-
-    expect(res.status).toBe(401);
-    const data = await res.json();
-    expect(data.code).toBe("unauthorized");
-  });
+    assert.equal(res.status, 401);
+    const data = (await res.json()) as { code: string };
+    assert.equal(data.code, "unauthorized");
+  } finally {
+    closeDatabase(result);
+  }
 });

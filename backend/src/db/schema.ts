@@ -93,10 +93,20 @@ export const providerProfiles = sqliteTable("provider_profiles", {
    * offered (0-120). Does not change weekly hours or move existing locks. */
   bufferMinutes: integer("buffer_minutes").notNull().default(0),
   isApproved: integer("is_approved", { mode: "boolean" }).notNull().default(false),
-  /** Increases only when a booking's deposit is reconciled as released
-   * (FR20); never written by hand outside the reconciler/event worker's own
-   * bookkeeping. The seeder may write an explicit demo value -- see
-   * `seed/demoData.ts`'s own note. */
+  /**
+   * Admin suspension. A suspended shop stays `isApproved` -- it was
+   * approved once -- but every marketplace read excludes it
+   * (`db/providerProfiles.ts`), `getPublicProviderProfile` treats it as
+   * not found, and `holdSlot` refuses it, so it cannot take new bookings.
+   * `suspensionReason` is the latest reason an admin gave: suspending
+   * twice overwrites both fields rather than appending a second reason.
+   * Clearing both (`unsuspend`) puts the shop back into discovery with no
+   * re-approval. Existing bookings are never touched.
+   */
+  suspendedAt: integer("suspended_at"),
+  suspensionReason: text("suspension_reason"),
+  /** Increases only on the chain's `released` event (FR20); never written
+   * by hand outside the event worker's own bookkeeping. */
   verifiedSessionCount: integer("verified_session_count").notNull().default(0),
   /** Increases only when the provider is the party who cancelled (FR23).
    * A client cancelling, a refund, or a dispute with any other reason never
@@ -303,6 +313,16 @@ export const bookings = sqliteTable("bookings", {
   pendingDisputeReason: text("pending_dispute_reason", { enum: DISPUTE_REASONS }),
   pendingDisputeOpenerWallet: text("pending_dispute_opener_wallet"),
   pendingDisputeOpenerRole: text("pending_dispute_opener_role", { enum: ["client", "provider"] }),
+  /** Issue #22: the note the dispute opener attached to the pending dispute
+   * (free text, may be empty). Stored here at build time so
+   * `submitSignedTransaction` can write it into `escrow_dispute_openings`
+   * once a matching signed transaction is actually relayed. */
+  pendingDisputeNote: text("pending_dispute_note"),
+  /** Issue #22: the SHA-256 hex evidence hash the dispute opener attached
+   * (64 lowercase hex characters, or null). Stored here at build time the
+   * same way, and written to `escrow_dispute_openings` at submit time. The
+   * document itself is never stored -- only this hash is. */
+  pendingDisputeEvidenceHash: text("pending_dispute_evidence_hash"),
   /** The unsigned resolve-dispute transaction's own hash -- also recorded on
    * `escrow_dispute_resolutions.tx_hash` (Design Notes: "Why the resolution
    * decision is recorded with its txHash"), duplicated here purely so
@@ -387,6 +407,12 @@ export const bookings = sqliteTable("bookings", {
    * recorded. A client's cancelling never sets it. */
   providerCancellationCountedAt: integer("provider_cancellation_counted_at"),
 
+  /**
+   * Story: Mark client arrived -- the shop marks when a client walks in for
+   * a locked booking, at or after the appointment start. Set once by the
+   * provider; clients see it but cannot set it themselves. UTC epoch seconds.
+   */
+  arrivedAt: integer("arrived_at"),
   /** Issue #35: UTC epoch seconds when client reminder was shown. Set once,
    * never cleared. When null and appointment is within 24h, reminder is
    * shown to client. */
@@ -694,6 +720,15 @@ export const escrowDisputeOpenings = sqliteTable("escrow_dispute_openings", {
   suggestedOutcome: text("suggested_outcome", { enum: DISPUTE_OUTCOMES }),
   /** The unsigned start-dispute transaction's own hash. */
   txHash: text("tx_hash").notNull(),
+  /** Story 3.6 amendment (Issue #22): a free-text note the dispute opener
+   * attaches to the dispute, so a client can point at a document without
+   * the file itself ever being stored. `null` when none was given. */
+  note: text("note"),
+  /** Story 3.6 amendment (Issue #22): a SHA-256 hex string (64 lowercase
+   * hex characters) the opener attests to, hashing a document they can
+   * point at. The file itself is never stored -- only this hash is.
+   * `null` when none was given. */
+  evidenceHash: text("evidence_hash"),
   /** UTC epoch seconds (review round: was epoch milliseconds -- brought in
    * line with every other booking-related time column, and with
    * `cancelDeadline`, which `suggestedOutcome`'s own client-cancel branch
@@ -702,6 +737,24 @@ export const escrowDisputeOpenings = sqliteTable("escrow_dispute_openings", {
 });
 
 /**
+ * Story: saved shops (#73) - a client's personal list of shops they want to
+ * book again. Only signed-in clients can save shops; only approved shops can
+ * be saved. Saving is idempotent (saving twice is a no-op). A shop with a
+ * booking is not saved automatically. The unique constraint on (clientWallet,
+ * providerProfileId) prevents duplicates.
+ */
+export const savedShops = sqliteTable(
+  "saved_shops",
+  {
+    id: text("id").primaryKey(),
+    clientWalletAddress: text("client_wallet_address").notNull(),
+    providerProfileId: text("provider_profile_id")
+      .notNull()
+      .references(() => providerProfiles.id),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [unique().on(table.clientWalletAddress, table.providerProfileId)],
+);
  * Shop reports: a signed-in client can report a shop listing to admins.
  * One report per client per shop per day. Does not change the shop's status.
  */
