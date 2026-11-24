@@ -350,6 +350,52 @@ export function updateEscrowStateIfNotTerminalSync(db: DbOrTx, id: string, escro
   return result.changes > 0;
 }
 
+/** Story 3.8: sets the client's private note on a booking (up to 500 chars).
+ * The note is visible on the booking detail page to the shop and the client,
+ * never on the public profile or discovery. An empty note clears the
+ * previous note. Throws if `id` matches no row. */
+export async function setBookingNote(db: Db, id: string, note: string): Promise<void> {
+  // Enforce 500-character limit
+  if (note.length > 500) {
+    throw new TypeError(`Note must be 500 characters or fewer, got ${note.length} characters.`);
+  }
+  // Check booking exists and is not in a terminal state
+  const booking = await getBookingById(db, id);
+  if (!booking) {
+    throw new TypeError(`No booking exists with id "${id}"`);
+  }
+  // Note can only be set on non-terminal bookings (not released or refunded)
+  if (booking.escrowState === "released" || booking.escrowState === "refunded") {
+    throw new TypeError(`Cannot set note on a booking that is "${booking.escrowState}".`);
+  }
+  const result = await db
+    .update(bookings)
+    .set({ note })
+    .where(eq(bookings.id, id));
+  if (result.changes === 0) {
+    throw new TypeError(`No booking exists with id "${id}"`);
+  }
+}
+
+/** Clears the private note on a booking. Returns `false` if the booking
+ * does not exist. */
+export async function clearBookingNote(db: Db, id: string): Promise<boolean> {
+  // Check booking exists and is not in a terminal state
+  const booking = await getBookingById(db, id);
+  if (!booking) {
+    return false;
+  }
+  // Note can only be cleared on non-terminal bookings (not released or refunded)
+  if (booking.escrowState === "released" || booking.escrowState === "refunded") {
+    return false;
+  }
+  const result = await db
+    .update(bookings)
+    .set({ note: null })
+    .where(eq(bookings.id, id));
+  return result.changes > 0;
+}
+
 /** The backend's own write path for the balance side of AD-3. Touches
  * `balanceState` alone -- never `escrowState`. Throws if `id` matches no
  * row, rather than silently writing nothing. */

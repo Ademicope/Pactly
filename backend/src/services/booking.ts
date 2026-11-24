@@ -1711,9 +1711,10 @@ export interface BookingView {
    * no transaction to point at). Drives the balance row's own Stellar
    * Expert link, per the spec's own "Always" rule. */
   balancePaymentTxHash: string | null;
-  /** UTC epoch seconds -- when the provider marked the client as arrived,
-   * `null` until marked. */
-  arrivedAt: number | null;
+  /** Story 3.8: the client's private note on this booking (visible to the
+   * shop and the client on the booking detail page, never on the public
+   * profile or discovery). */
+  note: string | null;
   /** Issue #35: true when this read triggered showing a reminder (appointment
    * day-before notice). False when already shown or conditions not met. */
   reminderShown: boolean;
@@ -1778,7 +1779,7 @@ export async function getBookingView(
       ? { id: profile.id, displayName: profile.displayName, title: profile.title }
       : { id: booking.providerProfileId, displayName: "", title: "" },
     balancePaymentTxHash: booking.balancePaymentTxHash,
-    arrivedAt: booking.arrivedAt,
+    note: booking.note,
     reminderShown,
   };
 }
