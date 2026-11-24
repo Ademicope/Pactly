@@ -389,7 +389,7 @@ test("fundDeposit refuses once escrow_state is already set", async () => {
   }
 });
 
-test("fundDeposit refuses once the hold has expired with escrow_state still null (Story 3.4 review)", async () => {
+test("fundDeposit does not expire once a deploy contract id is already persisted", async () => {
   const result = openTestDatabase();
   try {
     const bookingId = await seedBooking(result);
@@ -399,10 +399,16 @@ test("fundDeposit refuses once the hold has expired with escrow_state still null
     await recordDeploySubmission(result.db, bookingId, contractId, "deploy-tx-hash", past, past - 600);
     await result.db.update(bookings).set({ holdExpiresAt: past }).where(eq(bookings.id, bookingId));
 
-    await assert.rejects(
-      () => fundDeposit(result.db, bookingId, unreachableEscrowAdapter(), { now: past + 1 }),
-      (error: unknown) => error instanceof Error && error.name === "BookingHoldExpiredError",
-    );
+    // A persisted contract id is the evidence that a deploy was already
+    // submitted, so this booking is no longer an uncommitted hold and its
+    // old hold clock must not refuse the fund build.
+    const adapter: EscrowAdapter = {
+      ...unreachableEscrowAdapter(),
+      fund: async () => ({ unsignedXdr: "unsigned-fund-xdr", txHash: "fund-tx-hash" }),
+    };
+    const built = await fundDeposit(result.db, bookingId, adapter, { now: past + 1 });
+
+    assert.equal(built.txHash, "fund-tx-hash");
   } finally {
     closeDatabase(result);
   }

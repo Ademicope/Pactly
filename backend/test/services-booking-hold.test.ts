@@ -112,6 +112,53 @@ test("holdSlot derives every amount from the provider's own profile, never from 
   }
 });
 
+test("an expired, never-deployed hold frees the slot for a second client", async () => {
+  const result = openTestDatabase();
+  try {
+    const providerProfileId = await seedProviderProfile(result, { isApproved: true });
+    const now = 1_000_000;
+    const slotStartsAt = now + 3600;
+    await replaceFutureSlots(result.db, providerProfileId, [slotStartsAt], now);
+    const originalWallet = Keypair.random().publicKey();
+    const secondWallet = Keypair.random().publicKey();
+    const first = await holdSlot(
+      result.db,
+      { providerProfileId, clientWalletAddress: originalWallet, slotStartsAt },
+      { now, resolveUsdcAsset: resolveUsdc },
+    );
+    const { bookings } = await import("../src/db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    await result.db.update(bookings).set({ holdExpiresAt: now + 599 }).where(eq(bookings.id, first.bookingId));
+    const afterExpiry = now + 600;
+    await result.db.update(bookings).set({ holdExpiresAt: afterExpiry - 1 }).where(eq(bookings.id, first.bookingId));
+
+    const resumed = await holdSlot(
+      result.db,
+      { providerProfileId, clientWalletAddress: originalWallet, slotStartsAt },
+      { now: afterExpiry, resolveUsdcAsset: resolveUsdc },
+    );
+    assert.equal(resumed.isExpiredHold, true);
+
+    const renewed = await holdSlot(
+      result.db,
+      { providerProfileId, clientWalletAddress: originalWallet, slotStartsAt, renewExpired: true },
+      { now: afterExpiry, resolveUsdcAsset: resolveUsdc },
+    );
+    assert.notEqual(renewed.bookingId, first.bookingId);
+
+    await assert.rejects(
+      () => holdSlot(
+        result.db,
+        { providerProfileId, clientWalletAddress: secondWallet, slotStartsAt },
+        { now: afterExpiry, resolveUsdcAsset: resolveUsdc },
+      ),
+      SlotTakenError,
+    );
+  } finally {
+    closeDatabase(result);
+  }
+});
+
 test("holdSlot refuses for an unapproved provider", async () => {
   const result = openTestDatabase();
   try {
@@ -256,6 +303,32 @@ test("holdSlot: a locked booking keeps its slot even after its own original hold
     const { listOpenFutureSlots } = await import("../src/db/availabilitySlots.js");
     const open = await listOpenFutureSlots(result.db, providerProfileId, { now: wayAfterOriginalHold });
     assert.deepEqual(open, []);
+  } finally {
+    closeDatabase(result);
+  }
+});
+
+test("holdSlot: the exact expiry boundary is not past", async () => {
+  const result = openTestDatabase();
+  try {
+    const providerProfileId = await seedProviderProfile(result, { isApproved: true });
+    const now = 1_000_000;
+    const slotStartsAt = now + 3600;
+    await replaceFutureSlots(result.db, providerProfileId, [slotStartsAt], now);
+    const first = await holdSlot(
+      result.db,
+      { providerProfileId, clientWalletAddress: Keypair.random().publicKey(), slotStartsAt },
+      { now, resolveUsdcAsset: resolveUsdc },
+    );
+    const boundary = first.holdExpiresAt;
+    await assert.rejects(
+      () => holdSlot(
+        result.db,
+        { providerProfileId, clientWalletAddress: Keypair.random().publicKey(), slotStartsAt },
+        { now: boundary, resolveUsdcAsset: resolveUsdc },
+      ),
+      SlotTakenError,
+    );
   } finally {
     closeDatabase(result);
   }

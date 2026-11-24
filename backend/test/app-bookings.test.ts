@@ -212,11 +212,20 @@ test("GET /bookings/:id returns the owner's own booking view", async () => {
 
     const app = createApp(result.db);
     const headers = await authHeader(clientWalletAddress);
+    const before = Math.floor(Date.now() / 1000);
     const response = await app.request(`/bookings/${hold.bookingId}`, { headers });
+    const after = Math.floor(Date.now() / 1000);
     assert.equal(response.status, 200);
-    const body = (await response.json()) as { id: string; escrowState: string | null };
+    const body = (await response.json()) as {
+      id: string;
+      escrowState: string | null;
+      cancelDeadline: number;
+      serverTime: number;
+    };
     assert.equal(body.id, hold.bookingId);
     assert.equal(body.escrowState, null);
+    assert.equal(typeof body.cancelDeadline, "number");
+    assert.ok(body.serverTime >= before && body.serverTime <= after);
   } finally {
     closeDatabase(result);
   }
@@ -395,7 +404,7 @@ test("POST /bookings/:id/lock gives 409 HOLD_EXPIRED once the hold's own clock h
   }
 });
 
-test("POST /bookings/:id/fund gives 409 HOLD_EXPIRED when a deploy was already submitted but the (re-extended) hold has since passed", async () => {
+test("POST /bookings/:id/fund does not expire when a deploy contract id is already persisted", async () => {
   const result = openTestDatabase();
   try {
     const providerProfileId = await seedProviderProfile(result, { isApproved: true });
@@ -407,8 +416,8 @@ test("POST /bookings/:id/fund gives 409 HOLD_EXPIRED when a deploy was already s
 
     const { updateEscrowContractId, recordDeploySubmission } = await import("../src/db/bookings.js");
     await updateEscrowContractId(result.db, hold.bookingId, "CFAKECONTRACT000000000000000000000000000000000000", "unsigned-xdr", "deploy-tx-hash");
-    // A deploy was submitted, extending the hold ten minutes past `now` --
-    // then the fund attempt happens even later than that.
+    // A deploy was submitted, and the persisted contract id is the evidence
+    // that this is no longer an uncommitted hold.
     await recordDeploySubmission(result.db, hold.bookingId, "CFAKECONTRACT000000000000000000000000000000000000", "deploy-tx-hash", now + 600, now);
     const { bookings } = await import("../src/db/schema.js");
     const { eq } = await import("drizzle-orm");
@@ -417,8 +426,8 @@ test("POST /bookings/:id/fund gives 409 HOLD_EXPIRED when a deploy was already s
     const app = createApp(result.db);
     const headers = { ...(await authHeader(clientWalletAddress)), "content-type": "application/json" };
     const fundResponse = await app.request(`/bookings/${hold.bookingId}/fund`, { method: "POST", headers });
-    assert.equal(fundResponse.status, 409);
-    assert.equal(((await fundResponse.json()) as { code: string }).code, "HOLD_EXPIRED");
+    assert.equal(fundResponse.status, 503);
+    assert.equal(((await fundResponse.json()) as { code: string }).code, "ESCROW_UNAVAILABLE");
   } finally {
     closeDatabase(result);
   }
