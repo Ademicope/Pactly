@@ -138,6 +138,7 @@ import {
   submitLocalDepositTrustline,
   type LocalDepositDeps,
 } from "./services/localDeposit.js";
+import { retryFailedDeposit } from "./services/localDeposit.js";
 import {
   InvalidReportReasonError,
   ReportRateLimitError,
@@ -1062,7 +1063,9 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
     }
     try {
-      const result = await retryFailedDeposit(db, bookingId, c.get("walletAddress"), localDepositDeps);
+      await ensureCustodialReady(c.get("walletAddress"));
+      const booking = await getBookingForClient(db, bookingId, c.get("walletAddress"));
+      const result = await retryFailedDeposit(db, booking, c.get("walletAddress"), localDepositDeps);
       return c.json(result);
     } catch (error) {
       const mapped = localDepositErrorResponse(error, c);

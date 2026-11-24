@@ -338,14 +338,8 @@ export async function openLocalDeposit(
 
   return openAgainstAnchor(db, booking, walletAddress, deps);
 }
-
-/** Story #19: retry a failed anchor deposit without starting a new hold.
- * Reuses the existing hold and anchor deposit ID, does not deploy a new escrow.
- * Only retries when the current anchor deposit status is "failed".
- * Throws BookingHoldExpiredError if the hold has expired.
- * Throws if the anchor deposit is for a different booking or already in a non-failed state.
- */
-async function retryFailedDeposit(
+/** Story #19: retry a failed anchor deposit without starting a new hold. */
+export async function retryFailedDeposit(
   db: Db,
   booking: BookingRow,
   walletAddress: string,
