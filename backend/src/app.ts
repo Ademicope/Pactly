@@ -136,6 +136,11 @@ import type { EscrowAdapter } from "./escrow/interface.js";
 import { PaymentFailedError, PaymentUnavailableError } from "./payments/errors.js";
 import type { SubmitPaymentDeps } from "./payments/stellar.js";
 import { InvalidBreaksError } from "./services/availability.js";
+import {
+  InvalidExportRangeError,
+  exportProviderBookings,
+  parseExportRange,
+} from "./services/bookingsExport.js";
 import { config } from "./config.js";
 import { DISPUTE_OUTCOMES, type DisputeOutcome, type DisputeReason } from "./db/schema.js";
 import { getBookingById, setBookingNote, clearBookingNote } from "./db/bookings.js";
@@ -1663,22 +1668,31 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
     return c.json({ bookings: bookingsList });
   });
 
-  /** Issue #31: the signed-in wallet's own in-app event list -- lock,
-   * release, dispute and resolve events for every booking they are a party
-   * to, newest first, linking to each booking. A wallet never sees events
-   * for a booking they are not in. */
-  app.get("/me/events", requirePactlyAuth, async (c) => {
-    const walletAddress = c.get("walletAddress");
-    const clientBookings = await listBookingsForClient(db, walletAddress);
-    let providerBookings: Array<{ id: string }> = [];
+  /** Issue #67: the signed-in shop downloads its own bookings as CSV for a
+   * from/to range. An inverted range is a `400 INVALID_RANGE`; another
+   * shop's bookings are never read. */
+  app.get("/me/provider/bookings/export", requirePactlyAuth, async (c) => {
+    let range;
     try {
-      providerBookings = await listBookingsForProvider(db, walletAddress);
+      range = parseExportRange(c.req.query("from"), c.req.query("to"));
     } catch (error) {
-      if (!(error instanceof NotAProviderError)) throw error;
+      if (error instanceof InvalidExportRangeError) {
+        return c.json({ code: "INVALID_RANGE", message: error.message }, 400);
+      }
+      throw error;
     }
-    const bookingIds = [...new Set([...clientBookings, ...providerBookings].map((booking) => booking.id))];
-    const events = await listEscrowEventsForParties(db, walletAddress, bookingIds);
-    return c.json({ events });
+    try {
+      const { csv, fileName } = await exportProviderBookings(db, c.get("walletAddress"), range);
+      return c.body(csv, 200, {
+        "content-type": "text/csv; charset=utf-8",
+        "content-disposition": `attachment; filename="${fileName}"`,
+      });
+    } catch (error) {
+      if (error instanceof NotAProviderError) {
+        return c.json({ code: "NOT_A_PROVIDER", message: error.message }, 404);
+      }
+      throw error;
+    }
   });
 
   /** The provider panel's "Bookings" view: every booking against the

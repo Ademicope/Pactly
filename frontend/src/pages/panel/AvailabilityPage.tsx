@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { CalendarBlankIcon } from "@phosphor-icons/react";
 
-import { ApiError } from "../../api/client";
+import { ApiError, apiDownload } from "../../api/client";
 import { PageMasthead } from "../../components/PageMasthead";
 import { SignInPanel } from "../../components/SignInPanel";
 import {
@@ -100,6 +100,23 @@ function timeTextToMinutes(value: string): number | undefined {
 function minutesToTimeText(minutes: number): string {
   const hours = Math.floor(minutes / 60);
   return `${String(hours).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+/** `YYYY-MM-DD` for a `<input type="date">`, in the browser's own local
+ * day (the range is inclusive of both ends). */
+function toDateInput(ms: number): string {
+  const date = new Date(ms);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function dayStartEpochSeconds(dateText: string): number {
+  return Math.floor(new Date(`${dateText}T00:00:00`).getTime() / 1000);
+}
+
+function dayEndEpochSeconds(dateText: string): number {
+  return Math.floor(new Date(`${dateText}T23:59:59`).getTime() / 1000);
 }
 
 function isBlocked(cell: number, selected: ReadonlySet<number>, sessionSeconds: number): boolean {
@@ -315,6 +332,33 @@ export function AvailabilityPage() {
       setSelectedSlots(new Set(saved.slots));
     } catch {
       // Surfaced through `breaksErrorText` below.
+    }
+  }
+
+  async function handleExport(): Promise<void> {
+    if (!session) {
+      return;
+    }
+    setExportError(undefined);
+    setExporting(true);
+    try {
+      const query = new URLSearchParams({
+        from: String(dayStartEpochSeconds(exportFrom)),
+        to: String(dayEndEpochSeconds(exportTo)),
+      });
+      const { blob, filename } = await apiDownload(`/me/provider/bookings/export?${query.toString()}`, session.token);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename ?? "pactly-bookings.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError(error instanceof ApiError ? error.message : "The export could not be built.");
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -644,6 +688,29 @@ export function AvailabilityPage() {
         >
           {updateBreaks.isPending ? "Saving…" : "Save breaks"}
         </button>
+      </section>
+
+      <section className="card" style={{ marginBottom: "var(--space-6)" }}>
+        <h2 style={{ fontSize: "var(--text-18)", marginTop: 0 }}>Export bookings</h2>
+        <p>Download your own bookings as a CSV for a date range. No client emails or intake answers are included.</p>
+        {exportError && (
+          <div className="banner banner--alert" role="alert" style={{ marginBottom: "var(--space-4)" }}>
+            {exportError}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: "var(--space-3)", alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div className="field">
+            <label htmlFor="exportFrom">From</label>
+            <input id="exportFrom" type="date" value={exportFrom} onChange={(event) => setExportFrom(event.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="exportTo">To</label>
+            <input id="exportTo" type="date" value={exportTo} onChange={(event) => setExportTo(event.target.value)} />
+          </div>
+          <button type="button" className="button-primary" onClick={handleExport} disabled={exporting}>
+            {exporting ? "Preparing…" : "Download CSV"}
+          </button>
+        </div>
       </section>
 
       <section className="card">
