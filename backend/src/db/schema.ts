@@ -94,6 +94,8 @@ export const providerProfiles = sqliteTable("provider_profiles", {
    * sooner than this are not offered/held. Zero means immediate booking.
    * Defaults to 0 for profiles created before this field. */
   minimumNoticeMinutes: integer("minimum_notice_minutes").notNull().default(0),
+  /** Null means unlimited; otherwise clients may book only this many days ahead. */
+  maxBookingDaysAhead: integer("max_booking_days_ahead"),
   /** Minutes kept free after a locked booking before another slot may be
    * offered (0-120). Does not change weekly hours or move existing locks. */
   bufferMinutes: integer("buffer_minutes").notNull().default(0),

@@ -44,6 +44,7 @@ import { TransactionBuilder } from "@stellar/stellar-sdk";
 import { eq } from "drizzle-orm";
 
 import { config } from "../config.js";
+import { isWithinBookingWindow } from "./bookingWindow.js";
 import { defaultEscrowAdapter } from "../escrow/trustless-work/client.js";
 import {
   getEscrowLifecycle,
@@ -410,6 +411,9 @@ export async function holdSlot(db: Db, input: HoldSlotInput, deps: HoldSlotDeps 
   }
   const slot = await getSlotByProviderAndStart(db, profile.id, input.slotStartsAt);
   if (!slot || slot.startsAt <= now) {
+    throw new SlotUnavailableError();
+  }
+  if (!isWithinBookingWindow(slot.startsAt, now, profile.maxBookingDaysAhead)) {
     throw new SlotUnavailableError();
   }
   // A one-off closure hides the slot from every list; refuse a direct post of

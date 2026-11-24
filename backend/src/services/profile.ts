@@ -34,7 +34,7 @@ import {
 import { getCategoryById, getCategoryBySlug, listCategories, listVisibleCategories, type CategoryRow } from "../db/categories.js";
 import type { Db } from "../db/client.js";
 import { listEarliestOfferedSlotsByProvider, listOfferedSlots } from "./availability.js";
-import { buildPublicHours, type PublicDayHours } from "./publicHours.js";
+import { isWithinBookingWindow } from "./bookingWindow.js";
 
 /** Pactly's only supported asset for now (matches `services/booking.ts`'s
  * own `DEPOSIT_ASSET_SYMBOL`). Every amount this module returns is shaped
@@ -201,6 +201,8 @@ export interface ProviderRulesInput {
   cancellationWindowHours: number;
   /** Issue #36: minimum notice in minutes (0-10080, i.e. 0-7 days). */
   minimumNoticeMinutes?: number;
+  /** Positive whole days, or null/omitted for no booking horizon. */
+  maxBookingDaysAhead?: number | null;
   /** Minutes kept free after a locked booking (0-120). Omitted means 0. */
   bufferMinutes?: number;
 }
@@ -212,6 +214,7 @@ const MIN_CANCELLATION_WINDOW_HOURS = 0;
 const MAX_CANCELLATION_WINDOW_HOURS = 720;
 const MIN_NOTICE_MINUTES = 0;
 const MAX_NOTICE_MINUTES = 10080; // 7 days
+const MAX_BOOKING_DAYS_AHEAD = 3650;
 const MIN_BUFFER_MINUTES = 0;
 const MAX_BUFFER_MINUTES = 120;
 
@@ -253,6 +256,15 @@ export function validateProviderRules(input: ProviderRulesInput): Record<string,
       input.minimumNoticeMinutes > MAX_NOTICE_MINUTES
     ) {
       details.minimumNoticeMinutes = `Minimum notice must be a whole number of minutes between ${MIN_NOTICE_MINUTES} and ${MAX_NOTICE_MINUTES} (0-7 days).`;
+    }
+  }
+  if (input.maxBookingDaysAhead !== undefined && input.maxBookingDaysAhead !== null) {
+    if (
+      !Number.isInteger(input.maxBookingDaysAhead) ||
+      input.maxBookingDaysAhead < 1 ||
+      input.maxBookingDaysAhead > MAX_BOOKING_DAYS_AHEAD
+    ) {
+      details.maxBookingDaysAhead = `Maximum booking horizon must be a whole number of days between 1 and ${MAX_BOOKING_DAYS_AHEAD}, or blank for no limit.`;
     }
   }
 
@@ -347,6 +359,7 @@ export interface ProviderProfileView {
   cancellationWindowHours: number;
   /** Issue #36: minimum notice in minutes (0-7 days). */
   minimumNoticeMinutes: number;
+  maxBookingDaysAhead: number | null;
   bufferMinutes: number;
   verifiedSessionCount: number;
   /** Issue #2: the provider's own cancellation count, shown beside the
@@ -404,6 +417,7 @@ export function buildProviderProfileView(
     depositRateBps: profile.depositRateBps,
     cancellationWindowHours: profile.cancellationWindowHours,
     minimumNoticeMinutes: profile.minimumNoticeMinutes,
+    maxBookingDaysAhead: profile.maxBookingDaysAhead,
     bufferMinutes: profile.bufferMinutes,
     verifiedSessionCount: profile.verifiedSessionCount,
     providerCancellationCount: profile.providerCancellationCount,
@@ -459,9 +473,12 @@ export async function getPublicProviderProfile(
     bufferMinutes: profile.bufferMinutes,
   });
   const noticeSeconds = (profile.minimumNoticeMinutes ?? 0) * 60;
-  const visibleStarts = noticeSeconds > 0
+  let visibleStarts = noticeSeconds > 0
     ? offeredStarts.filter((startsAt) => startsAt >= now + noticeSeconds)
     : offeredStarts;
+  visibleStarts = visibleStarts.filter((startsAt) =>
+    isWithinBookingWindow(startsAt, now, profile.maxBookingDaysAhead),
+  );
   return buildProviderProfileView(profile, category, visibleStarts);
 }
 
@@ -504,6 +521,7 @@ export async function updateProviderRules(
     priceAmount: input.priceAmount,
     depositRateBps,
     cancellationWindowHours: input.cancellationWindowHours,
+    maxBookingDaysAhead: input.maxBookingDaysAhead,
     bufferMinutes: input.bufferMinutes ?? 0,
   });
   return getOwnProviderProfile(db, walletAddress);
@@ -927,11 +945,17 @@ export async function listDiscoverProviders(
     now,
     CARD_EARLIEST_SLOTS_LIMIT,
   );
-  const weeklyPatternSlotsByProvider = await listWeeklyPatternSlotsByProvider(
-    db,
-    profiles.map((profile) => profile.id),
-    now,
-  );
+  for (const profile of profiles) {
+    const slots = earliestSlotsByProvider.get(profile.id);
+    if (slots) {
+      earliestSlotsByProvider.set(
+        profile.id,
+        slots.filter((startsAt) =>
+          isWithinBookingWindow(startsAt, now, profile.maxBookingDaysAhead),
+        ),
+      );
+    }
+  }
 
   // Availability: a provider's *earliest* future slot is, by definition,
   // its closest one to `now` -- so "at least one open slot within the

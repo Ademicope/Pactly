@@ -56,6 +56,7 @@ export interface ProviderProfile {
   deposit: Money;
   depositRateBps: number;
   cancellationWindowHours: number;
+  maxBookingDaysAhead: number | null;
   bufferMinutes: number;
   verifiedSessionCount: number;
   /** Issue #2: shown beside the verified-session line; zero is shown. */

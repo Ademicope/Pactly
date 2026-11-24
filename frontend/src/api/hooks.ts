@@ -171,6 +171,7 @@ export interface ProviderRulesInput {
   priceAmount: string;
   depositRateBps: number;
   cancellationWindowHours: number;
+  maxBookingDaysAhead: number | null;
   bufferMinutes: number;
 }
 

@@ -25,6 +25,7 @@ export interface NewProviderProfile {
   cancellationWindowHours: number;
   bufferMinutes?: number;
   minimumNoticeMinutes?: number;
+  maxBookingDaysAhead?: number | null;
   isApproved?: boolean;
   /** Issue #2: seed-only. A real profile starts at 0 and only ever moves
    * through the reconciler's own once-only writes -- the demo seeder is the
@@ -52,6 +53,7 @@ export async function insertProviderProfile(db: Db, values: NewProviderProfile):
     cancellationWindowHours: values.cancellationWindowHours,
     bufferMinutes: values.bufferMinutes ?? 0,
     minimumNoticeMinutes: values.minimumNoticeMinutes ?? 0,
+    maxBookingDaysAhead: values.maxBookingDaysAhead ?? null,
     isApproved: values.isApproved ?? false,
     verifiedSessionCount: values.verifiedSessionCount ?? 0,
     providerCancellationCount: values.providerCancellationCount ?? 0,
@@ -182,6 +184,7 @@ export async function listApprovedProviderProfilesForDiscover(
       depositRateBps: providerProfiles.depositRateBps,
       cancellationWindowHours: providerProfiles.cancellationWindowHours,
       minimumNoticeMinutes: providerProfiles.minimumNoticeMinutes,
+      maxBookingDaysAhead: providerProfiles.maxBookingDaysAhead,
       bufferMinutes: providerProfiles.bufferMinutes,
       minimumNoticeMinutes: providerProfiles.minimumNoticeMinutes,
       isApproved: providerProfiles.isApproved,
@@ -203,6 +206,7 @@ export interface ProviderRulesValues {
   cancellationWindowHours: number;
   /** Issue #36: minimum notice in minutes (0-10080). */
   minimumNoticeMinutes?: number;
+  maxBookingDaysAhead?: number | null;
   bufferMinutes: number;
 }
 
@@ -289,7 +293,7 @@ export async function updateProviderProfileText(db: Db, id: string, values: Prov
 }
 
 export async function updateProviderProfileRules(db: Db, id: string, values: ProviderRulesValues): Promise<void> {
-  const updateFields: Record<string, string | number> = {
+  const updateFields: Record<string, string | number | null> = {
     priceAmount: values.priceAmount,
     depositRateBps: values.depositRateBps,
     cancellationWindowHours: values.cancellationWindowHours,
@@ -297,6 +301,9 @@ export async function updateProviderProfileRules(db: Db, id: string, values: Pro
   // Issue #36: only update minimum notice if provided
   if (values.minimumNoticeMinutes !== undefined) {
     updateFields.minimumNoticeMinutes = values.minimumNoticeMinutes;
+  }
+  if (values.maxBookingDaysAhead !== undefined) {
+    updateFields.maxBookingDaysAhead = values.maxBookingDaysAhead;
   }
   if (values.bufferMinutes !== undefined) {
     updateFields.bufferMinutes = values.bufferMinutes;
