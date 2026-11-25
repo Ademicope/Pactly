@@ -99,6 +99,11 @@ export const providerProfiles = sqliteTable("provider_profiles", {
   /** Minutes kept free after a locked booking before another slot may be
    * offered (0-120). Does not change weekly hours or move existing locks. */
   bufferMinutes: integer("buffer_minutes").notNull().default(0),
+  /** JSON array of `{ id, label, required }` -- the questions a client is
+   * asked on each booking. Each booking keeps its own copy of the questions
+   * it was asked (`bookings.intake_answers`), so changing these later never
+   * rewrites an answer already stored on a booking. */
+  intakeQuestions: text("intake_questions").notNull().default("[]"),
   isApproved: integer("is_approved", { mode: "boolean" }).notNull().default(false),
   /**
    * Admin suspension. A suspended shop stays `isApproved` -- it was
@@ -237,6 +242,17 @@ export const bookings = sqliteTable("bookings", {
   /** Integer string, smallest unit (AD-7); the remainder of the session
    * price, settled off the escrow contract (Story 3.7). */
   balanceAmount: text("balance_amount").notNull().default("0"),
+  /**
+   * Issues #146-#148: the intake questions this booking was asked, each with
+   * the client's answer, as a JSON array of
+   * `{ questionId, label, required, answer }`. Copied from the shop's
+   * questions at hold time, so a later change to those questions never
+   * rewrites this booking. A question the client has not answered yet is
+   * kept with `answer: ""` -- never dropped -- so the shop still sees what
+   * was asked. Private to the client, the shop and an admin resolving a
+   * dispute: the public proof page and discovery never read this column.
+   */
+  intakeAnswers: text("intake_answers").notNull().default("[]"),
   /** UTC epoch seconds -- the same unit and value passed to `create_booking`. */
   cancelDeadline: integer("cancel_deadline").notNull(),
   /** `null` until the event worker records this booking's first event. */
@@ -411,6 +427,18 @@ export const bookings = sqliteTable("bookings", {
    * SUCCESS"). `null` for a booking whose balance is unpaid, or paid in
    * cash (which has no transaction to point at). */
   balancePaymentTxHash: text("balance_payment_tx_hash"),
+  /**
+   * Issue #149: the balance figure recorded as settled in person when this
+   * booking was cancelled (integer string, smallest unit, AD-7). `null`
+   * until a figure is recorded. The shop may correct it exactly once:
+   * the correction moves the first figure into
+   * `inPersonBalancePreviousAmount` and stamps `inPersonBalanceCorrectedAt`,
+   * so the original number is never lost and a second correction is refused.
+   */
+  inPersonBalanceAmount: text("in_person_balance_amount"),
+  inPersonBalancePreviousAmount: text("in_person_balance_previous_amount"),
+  /** UTC epoch seconds. */
+  inPersonBalanceCorrectedAt: integer("in_person_balance_corrected_at"),
 
   /**
    * Story 2.4: the SEP-6 local-currency deposit opened against this

@@ -494,6 +494,24 @@ export function runMigrations(sqlite: Database): void {
   if (!hasColumn(sqlite, "categories", "visible")) {
     sqlite.exec(`ALTER TABLE categories ADD COLUMN visible INTEGER NOT NULL DEFAULT 1`);
   }
+  // Issues #146-#148: the shop's intake questions and each booking's own
+  // copy of them with the client's answers.
+  if (!hasColumn(sqlite, "provider_profiles", "intake_questions")) {
+    sqlite.exec(`ALTER TABLE provider_profiles ADD COLUMN intake_questions TEXT NOT NULL DEFAULT '[]'`);
+  }
+  if (!hasColumn(sqlite, "bookings", "intake_answers")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN intake_answers TEXT NOT NULL DEFAULT '[]'`);
+  }
+  // Issue #149: a recorded in-person balance and its one correction.
+  if (!hasColumn(sqlite, "bookings", "in_person_balance_amount")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN in_person_balance_amount TEXT`);
+  }
+  if (!hasColumn(sqlite, "bookings", "in_person_balance_previous_amount")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN in_person_balance_previous_amount TEXT`);
+  }
+  if (!hasColumn(sqlite, "bookings", "in_person_balance_corrected_at")) {
+    sqlite.exec(`ALTER TABLE bookings ADD COLUMN in_person_balance_corrected_at INTEGER`);
+  }
   // Story 3.8: the client's private note on a booking.
   if (!hasColumn(sqlite, "bookings", "note")) {
     sqlite.exec(`ALTER TABLE bookings ADD COLUMN note TEXT`);

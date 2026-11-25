@@ -343,3 +343,13 @@ export async function setProviderProfileSuspension(
     throw new TypeError(`No provider profile exists with id "${id}"`);
   }
 }
+
+/** Issues #146-#148: replaces the shop's intake questions (a JSON array of
+ * `{ id, label, required }`). Bookings already held keep their own copy of
+ * the questions they were asked -- this never rewrites them. */
+export async function setProviderProfileIntakeQuestions(db: Db, id: string, intakeQuestionsJson: string): Promise<void> {
+  const result = await db.update(providerProfiles).set({ intakeQuestions: intakeQuestionsJson }).where(eq(providerProfiles.id, id));
+  if (result.changes === 0) {
+    throw new TypeError(`No provider profile exists with id "${id}"`);
+  }
+}

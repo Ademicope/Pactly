@@ -988,6 +988,11 @@ export async function listDiscoverProviders(
     );
   }
 
+  const weeklyPatternSlotsByProvider = await listWeeklyPatternSlotsByProvider(
+    db,
+    profiles.map((profile) => profile.id),
+    now,
+  );
   const cards = profiles.map((profile) => {
     const category = categoryById.get(profile.categoryId);
     if (!category) {

@@ -39,6 +39,8 @@ export interface NewBooking {
   /** Story 3.4 (AD-13): the hold's own expiry, UTC epoch seconds.
    * `undefined` only for a pre-3.4 caller. */
   holdExpiresAt?: number;
+  /** Issues #146-#148: JSON-encoded intake answers (see the schema). */
+  intakeAnswers?: string;
   createdAt: number;
 }
 
@@ -68,6 +70,7 @@ export async function insertBooking(db: Db, values: NewBooking): Promise<void> {
     balanceState: values.balanceState ?? "unpaid",
     slotId: values.slotId,
     holdExpiresAt: values.holdExpiresAt,
+    intakeAnswers: values.intakeAnswers ?? "[]",
     createdAt: values.createdAt,
   });
 }
@@ -96,12 +99,12 @@ export async function insertBookingHoldIfSlotFree(
     INSERT INTO bookings (
       id, provider_profile_id, client_wallet_address, client_email, token_address,
       deposit_amount, balance_amount, cancel_deadline, slot_id, hold_expires_at,
-      balance_state, created_at
+      balance_state, intake_answers, created_at
     )
     SELECT
       ${values.id}, ${values.providerProfileId}, ${values.clientWalletAddress}, ${values.clientEmail ?? null}, ${values.tokenAddress},
       ${values.depositAmount}, ${values.balanceAmount ?? "0"}, ${values.cancelDeadline}, ${values.slotId}, ${values.holdExpiresAt},
-      ${values.balanceState ?? "unpaid"}, ${values.createdAt}
+      ${values.balanceState ?? "unpaid"}, ${values.intakeAnswers ?? "[]"}, ${values.createdAt}
     WHERE NOT EXISTS (
       SELECT 1 FROM bookings existing
       WHERE existing.slot_id = ${values.slotId}
@@ -1144,5 +1147,63 @@ export async function markBookingArrived(db: Db, bookingId: string, arrivedAt: n
     .update(bookings)
     .set({ arrivedAt })
     .where(and(eq(bookings.id, bookingId), isNull(bookings.arrivedAt)));
+  return result.changes > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Issues #146-#148: intake answers.
+// ---------------------------------------------------------------------------
+
+/** Issue #147: replaces a booking's intake answers, but only while it is
+ * still a hold -- the `WHERE` itself refuses once the deposit is locked
+ * (`escrow_state` set) or a deploy has been relayed (the lock is in
+ * flight), so an edit can never land after the lock even if it raced one.
+ * Returns whether the row was updated. */
+export async function updateIntakeAnswersWhileHold(db: Db, bookingId: string, intakeAnswers: string): Promise<boolean> {
+  const result = await db
+    .update(bookings)
+    .set({ intakeAnswers })
+    .where(and(eq(bookings.id, bookingId), isNull(bookings.escrowState), isNull(bookings.deploySubmittedAt)));
+  return result.changes > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #149: the in-person balance figure and its one correction.
+// ---------------------------------------------------------------------------
+
+/** Records the first in-person balance figure on a cancelled booking. Never
+ * overwrites an existing figure (returns `false` instead) -- a change to a
+ * recorded figure goes through {@link correctInPersonBalanceOnce}, which
+ * keeps the old one. */
+export async function recordInPersonBalance(db: Db, bookingId: string, amount: string): Promise<boolean> {
+  const result = await db
+    .update(bookings)
+    .set({ inPersonBalanceAmount: amount })
+    .where(and(eq(bookings.id, bookingId), isNull(bookings.inPersonBalanceAmount)));
+  return result.changes > 0;
+}
+
+/** Issue #149: the shop's one correction. In a single conditioned write it
+ * moves the current figure into `in_person_balance_previous_amount`, stores
+ * the new one and stamps the correction -- only for a cancelled
+ * (`refunded`) booking that already has a figure and has never been
+ * corrected. Returns whether it applied, so two concurrent corrections can
+ * never both land. */
+export async function correctInPersonBalanceOnce(db: Db, bookingId: string, amount: string, now: number): Promise<boolean> {
+  const result = await db
+    .update(bookings)
+    .set({
+      inPersonBalancePreviousAmount: sql`${bookings.inPersonBalanceAmount}`,
+      inPersonBalanceAmount: amount,
+      inPersonBalanceCorrectedAt: now,
+    })
+    .where(
+      and(
+        eq(bookings.id, bookingId),
+        eq(bookings.escrowState, "refunded"),
+        isNotNull(bookings.inPersonBalanceAmount),
+        isNull(bookings.inPersonBalanceCorrectedAt),
+      ),
+    );
   return result.changes > 0;
 }

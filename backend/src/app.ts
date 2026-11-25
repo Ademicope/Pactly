@@ -215,7 +215,15 @@ import {
   getShopReportsForAdmin,
   submitShopReport,
 } from "./services/shopReports.js";
-import { DepositAlreadyLandedError } from "./services/booking.js";
+import {
+  DepositAlreadyLandedError,
+  InPersonBalanceCorrectionError,
+  IntakeAnswersIncompleteError,
+  IntakeAnswersLockedError,
+  correctInPersonBalance,
+  updateIntakeAnswers,
+} from "./services/booking.js";
+import { InvalidIntakeAnswersError } from "./services/intake.js";
 import { InvalidSuspensionReasonError, suggestProvidersForEmptySearch, suspendProviderProfile, unsuspendProviderProfile } from "./services/profile.js";
 import { UsdcTrustlineMissingError } from "./anchor/errors.js";
 import { getProviderProfileById } from "./db/providerProfiles.js";
@@ -1157,6 +1165,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
     const tzOffsetMinutes = typeof body?.tzOffsetMinutes === "number" ? body.tzOffsetMinutes : undefined;
     const clientEmail = typeof body?.clientEmail === "string" ? body.clientEmail : undefined;
     const renewExpired = body?.renewExpired === true;
+    const intakeAnswers: unknown = body?.intakeAnswers;
     if (!providerId || slotStartsAt === undefined) {
       return c.json(
         { code: "invalid_request", message: "providerId and slotStartsAt are required." },
@@ -1174,6 +1183,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
         tzOffsetMinutes,
         clientEmail,
         renewExpired,
+        intakeAnswers,
       });
       return c.json(result, 201);
     } catch (error) {
@@ -1253,6 +1263,11 @@ export function createApp(db: Db, options: CreateAppOptions = {}): App {
       }
       if (error instanceof BookingHoldExpiredError) {
         return c.json({ code: "HOLD_EXPIRED", message: error.message }, 409);
+      }
+      // Issue #148: a required intake answer is blank. Nothing was built or
+      // written, so the hold stays exactly as it was.
+      if (error instanceof IntakeAnswersIncompleteError) {
+        return c.json({ code: "INTAKE_INCOMPLETE", message: error.message, details: { questions: error.questions } }, 409);
       }
       // Issue #4: the client's own wallet cannot hold the deposit asset, so
       // no contract was deployed and no money was promised -- say what is
@@ -2372,6 +2387,65 @@ app.get("/bookings/:id/ics", requirePactlyAuth, async (c) => {
       }
       if (error instanceof BookingEscrowStateError) {
         return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
+      }
+      throw error;
+    }
+  });
+
+  /** Issue #147: the booking's own client changes their intake answers while
+   * the booking is still a hold. Body: `{ answers: { [questionId]: string } }`.
+   * Another client's booking is the same `404` every ownership check gives. */
+  app.put("/bookings/:id/intake", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    const body = await c.req.json().catch(() => undefined);
+    try {
+      const intakeAnswers = await updateIntakeAnswers(db, bookingId, c.get("walletAddress"), body?.answers);
+      return c.json({ intakeAnswers });
+    } catch (error) {
+      if (error instanceof BookingNotFoundError) {
+        return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof InvalidIntakeAnswersError) {
+        return c.json({ code: "INVALID_INTAKE_ANSWERS", message: error.message, details: error.details }, 400);
+      }
+      if (error instanceof IntakeAnswersLockedError) {
+        return c.json({ code: "INTAKE_LOCKED", message: error.message }, 409);
+      }
+      if (error instanceof BookingHoldExpiredError) {
+        return c.json({ code: "HOLD_EXPIRED", message: error.message }, 409);
+      }
+      if (error instanceof BookingEscrowStateError) {
+        return c.json({ code: "BOOKING_STATE", message: error.message }, 409);
+      }
+      throw error;
+    }
+  });
+
+  /** Issue #149: the shop corrects a cancelled booking's recorded in-person
+   * balance, once. Body: `{ amount: "<integer string, smallest unit>" }`.
+   * The old figure is kept and returned as `replaced`. */
+  app.post("/bookings/:id/balance/in-person/correct", requirePactlyAuth, async (c) => {
+    const bookingId = c.req.param("id");
+    if (!bookingId) {
+      return c.json({ code: "invalid_request", message: "booking id is required." }, 400);
+    }
+    const body = await c.req.json().catch(() => undefined);
+    try {
+      const inPersonBalance = await correctInPersonBalance(db, bookingId, c.get("walletAddress"), body?.amount);
+      return c.json({ inPersonBalance });
+    } catch (error) {
+      if (error instanceof BookingNotFoundError) {
+        return c.json({ code: "BOOKING_NOT_FOUND", message: error.message }, 404);
+      }
+      if (error instanceof InPersonBalanceCorrectionError) {
+        if (error.reason === "invalid_amount") {
+          return c.json({ code: "INVALID_AMOUNT", message: error.message }, 400);
+        }
+        const code = error.reason === "already_corrected" ? "ALREADY_CORRECTED" : "BOOKING_STATE";
+        return c.json({ code, message: error.message }, 409);
       }
       throw error;
     }
