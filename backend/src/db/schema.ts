@@ -100,6 +100,16 @@ export const providerProfiles = sqliteTable("provider_profiles", {
    * offered (0-120). Does not change weekly hours or move existing locks. */
   bufferMinutes: integer("buffer_minutes").notNull().default(0),
   isApproved: integer("is_approved", { mode: "boolean" }).notNull().default(false),
+  /**
+   * Admin suspension. A suspended shop stays `isApproved` -- it was
+   * approved once -- but every marketplace read excludes it
+   * (`db/providerProfiles.ts`), `getPublicProviderProfile` treats it as
+   * not found, and `holdSlot` refuses it, so it cannot take new bookings.
+   * `suspensionReason` is the latest reason an admin gave. Existing
+   * bookings are never touched.
+   */
+  suspendedAt: integer("suspended_at"),
+  suspensionReason: text("suspension_reason"),
   /** Issue #62: the shop's own pause on *new* bookings. Independent of
    * `isApproved` -- an admin suspension still hides the shop entirely, and
    * this pause never clears one. While `true`, discovery advertises the
@@ -842,6 +852,8 @@ export const savedShops = sqliteTable(
   },
   (table) => [unique().on(table.clientWalletAddress, table.providerProfileId)],
 );
+
+/**
  * Shop reports: a signed-in client can report a shop listing to admins.
  * One report per client per shop per day. Does not change the shop's status.
  */
@@ -881,3 +893,54 @@ export const waitlistEntries = sqliteTable(
 );
 
 export type WaitlistEntryRow = typeof waitlistEntries.$inferSelect;
+
+/**
+ * Issue #7: every escrow contract id a deploy ever returned for a booking,
+ * including one a later retry replaced. `bookings.escrow_contract_id` can
+ * only ever hold the current one, so a deploy that was replaced left a real
+ * contract -- possibly holding money -- that nothing in the app still links
+ * to; this table is what makes those visible to the client and to support.
+ *
+ * Write-only alongside that persisted id (never a replacement for it): every
+ * settlement call still reads `bookings.escrow_contract_id`, so a replaced
+ * id can never be used to move money by accident. Duplicate (booking,
+ * contract) pairs -- a retried lock that re-persisted the same deploy -- are
+ * recorded once.
+ */
+export const escrowContractDeployments = sqliteTable(
+  "escrow_contract_deployments",
+  {
+    bookingId: text("booking_id").notNull(),
+    /** The Trustless Work escrow's own identity (a Soroban `C...`) exactly
+     * as `deploy` returned it. */
+    contractId: text("contract_id").notNull(),
+    /** UTC epoch seconds -- when this contract id was persisted for the
+     * booking, the same clock `bookings.deploy_submitted_at` uses. */
+    deployedAt: integer("deployed_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.bookingId, table.contractId] })],
+);
+
+/**
+ * Issue #31: one row per party (client or provider) per booking-level event
+ * (lock, release, dispute, resolve). Every such action appends an event for
+ * each party to the booking, so both sides have an in-app list of what
+ * happened on a booking they are part of, newest first, linking to the
+ * booking. A row is scoped to one wallet -- one party never sees the other
+ * party's events for a booking they are not in (rows are keyed by
+ * `(booking_id, wallet_address)` plus the event's own order, so a party
+ * only ever reads rows for their own wallet on bookings they belong to).
+ */
+export const escrowEvents = sqliteTable("escrow_events", {
+  id: text("id").primaryKey(),
+  bookingId: text("booking_id")
+    .notNull()
+    .references(() => bookings.id),
+  /** Which party this event row is visible to -- the client's wallet or the
+   * provider's wallet on this booking. */
+  walletAddress: text("wallet_address").notNull(),
+  /** `lock` | `release` | `dispute` | `resolve`. */
+  type: text("type", { enum: ["lock", "release", "dispute", "resolve"] }).notNull(),
+  /** UTC epoch seconds -- the event's own wall-clock when it was recorded. */
+  createdAt: integer("created_at").notNull(),
+});

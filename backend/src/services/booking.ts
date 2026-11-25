@@ -116,6 +116,9 @@ import {
 import { PaymentUnavailableError } from "../payments/errors.js";
 import type { Db } from "../db/client.js";
 import { BALANCE_STATES, type BalanceState, type DisputeOpenerRole, type DisputeOutcome, type DisputeReason } from "../db/schema.js";
+import { insertAdminDecisionAuditSync } from "../db/adminDecisionAudit.js";
+import { listContractDeployments, recordContractDeployment } from "../db/escrowContractDeployments.js";
+import { recordEscrowEventForBothParties } from "../db/escrowEvents.js";
 
 /** Pactly's only supported asset for now (PRD): the deposit's trustline
  * symbol every `lockDeposit` deploy names. Not yet a per-booking or
@@ -683,6 +686,20 @@ async function requireProviderAddress(db: Db, booking: BookingRow): Promise<stri
  * the same goes for a persisted `escrowContractId`, which is the evidence
  * that a deploy was already submitted and this is no longer an uncommitted
  * hold. */
+/** Refuses {@link SlotInPastError} when the booking's slot has already
+ * started (or is starting right now) according to the server clock.
+ * This check applies to `lockDeposit` and `fundDeposit` -- a hold may have
+ * been created when the slot was in the future, but locking/funding must
+ * be refused once the slot start time has passed. */
+async function requireSlotNotInPast(db: Db, booking: BookingRow, now: number): Promise<void> {
+  if (booking.slotId !== null) {
+    const slot = await getSlotById(db, booking.slotId);
+    if (slot && slot.startsAt <= now) {
+      throw new SlotInPastError(slot.startsAt, now);
+    }
+  }
+}
+
 function requireHoldNotExpired(booking: BookingRow, now: number): void {
   if (
     booking.escrowState === null

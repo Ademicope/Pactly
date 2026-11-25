@@ -2,7 +2,6 @@
  * for provider/category data. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiGet, apiPost, apiPut, ApiError, apiDelete } from "./client";
 import { apiDelete, apiGet, apiPost, apiPut, ApiError } from "./client";
 import type {
   ActionResponse,
@@ -781,6 +780,9 @@ export function useSavedShops(session: Session | undefined) {
     enabled: Boolean(session),
     retry: false,
   });
+}
+
+// ---------------------------------------------------------------------------
 // Shop reports: clients report a shop to admins.
 // ---------------------------------------------------------------------------
 
